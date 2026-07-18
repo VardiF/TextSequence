@@ -24,7 +24,6 @@ def register_asset(project: Project, asset: Asset) -> Project:
         v1 = Track(id=f"track_{uuid4().hex}", name="V1")
         project.tracks.append(v1)
     v1.clips.append(Clip(id=f"clip_{uuid4().hex}", asset_id=asset.id, source_in_frame=0, source_out_frame=asset.duration_frames, timeline_start_frame=0))
-    project.revision += 1
     project.validate()
     return project
 
@@ -40,7 +39,6 @@ def _find_clip(project: Project, clip_id: str) -> tuple[Track, Clip]:
 def _apply_edit(project: Project, edit: Callable[[Project], None]) -> Project:
     edited = deepcopy(project)
     edit(edited)
-    edited.revision += 1
     edited.validate()
     return edited
 
@@ -60,6 +58,7 @@ def split_clip(project: Project, clip_id: str, timeline_frame: int) -> Project:
             source_in_frame=source_split,
             source_out_frame=original_out,
             timeline_start_frame=timeline_frame,
+            production=deepcopy(clip.production),
         ))
 
     return _apply_edit(project, edit)

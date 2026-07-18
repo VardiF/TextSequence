@@ -18,7 +18,7 @@ def _gaps(clips, timeline_end):
 def timeline_projection(project: Project) -> dict:
     assets = {asset.id: asset for asset in project.assets}
     tracks = []
-    for track in project.tracks:
+    for track in project.timeline.tracks:
         clips = sorted(track.clips, key=lambda item: (item.timeline_start_frame, item.id))
         tracks.append({
             "id": track.id, "name": track.name, "kind": track.kind,
@@ -32,5 +32,6 @@ def timeline_projection(project: Project) -> dict:
             "gaps": _gaps(clips, max([assets[a.id].duration_frames for a in project.assets] + [c.timeline_start_frame + c.duration_frames for c in clips] + [0])),
         })
     return {"project_id": project.id, "name": project.name, "revision": project.revision,
+            "revision_id": project.revision_id, "timeline_id": project.timeline.id,
             "fps": {"numerator": project.fps.numerator, "denominator": project.fps.denominator} if project.fps else None,
             "tracks": tracks}

@@ -1,0 +1,11 @@
+{
+  "id": "project_v1_silence",
+  "name": "V1 silence derived",
+  "fps": {"numerator": 24, "denominator": 1},
+  "revision": 3,
+  "assets": [{"id": "asset_silence", "path": "/tmp/silence.mp4", "name": "silence.mp4", "codec": "h264", "width": 160, "height": 90, "fps": {"numerator": 24, "denominator": 1}, "duration_frames": 96}],
+  "tracks": [{"id": "track_silence", "name": "V1", "kind": "video", "clips": [
+    {"id": "clip_original", "asset_id": "asset_silence", "source_in_frame": 0, "source_out_frame": 24, "timeline_start_frame": 0},
+    {"id": "clip_original_silence_1", "asset_id": "asset_silence", "source_in_frame": 48, "source_out_frame": 96, "timeline_start_frame": 24}
+  ]}]
+}

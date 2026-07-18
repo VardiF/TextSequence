@@ -1,0 +1,11 @@
+{
+  "id": "project_v1_edited",
+  "name": "V1 edited",
+  "fps": {"numerator": 24, "denominator": 1},
+  "revision": 7,
+  "assets": [{"id": "asset_edit", "path": "/tmp/edit.mp4", "name": "edit.mp4", "codec": "h264", "width": 320, "height": 180, "fps": {"numerator": 24, "denominator": 1}, "duration_frames": 120}],
+  "tracks": [{"id": "track_edit", "name": "V1", "kind": "video", "clips": [
+    {"id": "clip_left", "asset_id": "asset_edit", "source_in_frame": 10, "source_out_frame": 40, "timeline_start_frame": 20},
+    {"id": "clip_right", "asset_id": "asset_edit", "source_in_frame": 50, "source_out_frame": 90, "timeline_start_frame": 80}
+  ]}]
+}

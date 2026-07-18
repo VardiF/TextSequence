@@ -68,11 +68,10 @@ def apply_silence_removals(project: Project, removals: Iterable[SourceRemovalRan
                 rebuilt.append(Clip(id=clip.id if index == 0 else f"{clip.id}_silence_{index}",
                                     asset_id=clip.asset_id, source_in_frame=source_start,
                                     source_out_frame=source_end,
-                                    timeline_start_frame=new_start))
+                                    timeline_start_frame=new_start,
+                                    production=deepcopy(clip.production)))
                 new_start += duration
             cumulative_removed += removed_here
         track.clips = rebuilt
-    if total_removed:
-        edited.revision += 1
     edited.validate()
     return edited, total_removed, len(applied), applied

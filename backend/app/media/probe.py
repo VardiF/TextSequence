@@ -16,10 +16,9 @@ class ProbeError(ValueError):
 
 def find_ffprobe() -> str | None:
     candidates = [
-        shutil.which("ffprobe"),
         os.environ.get("FFPROBE_BIN"),
         str(Path(__file__).resolve().parents[3] / ".tools" / "ffprobe" / "ffprobe"),
-        "/usr/local/opt/ffmpeg/bin/ffprobe",
+        shutil.which("ffprobe"),
     ]
     for candidate in candidates:
         if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
@@ -33,7 +32,7 @@ def probe_media(path: str) -> Asset:
         raise ProbeError(f"Media file does not exist: {source}")
     ffprobe = find_ffprobe()
     if not ffprobe:
-        raise ProbeError("ffprobe is required but was not found")
+        raise ProbeError("ffprobe is required; install FFmpeg, configure FFPROBE_BIN, or provide .tools/ffprobe/ffprobe")
     command = [ffprobe, "-v", "error", "-select_streams", "v:0", "-count_frames", "-show_entries", "stream=codec_name,width,height,r_frame_rate,nb_read_frames", "-of", "json", str(source)]
     try:
         result = subprocess.run(command, check=True, capture_output=True, text=True)

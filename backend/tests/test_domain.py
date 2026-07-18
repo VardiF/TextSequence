@@ -56,7 +56,7 @@ def test_split_preserves_mapping_and_rejects_boundaries():
     assert (left.source_in_frame, left.source_out_frame, left.timeline_start_frame) == (100, 140, 100)
     assert (right.source_in_frame, right.source_out_frame, right.timeline_start_frame) == (140, 200, 140)
     assert right.id != left.id
-    assert edited.revision == 1
+    assert edited.revision == project.revision
     for frame in (100, 200):
         try:
             split_clip(project, "b", frame)

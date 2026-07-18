@@ -42,7 +42,7 @@ def compile_render_plan(project: Project) -> RenderPlan:
     project.validate()
     if project.fps is None:
         raise ValidationError("Cannot render a project without an FPS")
-    video_tracks = [track for track in project.tracks if track.kind == "video"]
+    video_tracks = [track for track in project.timeline.tracks if track.kind == "video"]
     clips = sorted((clip for track in video_tracks for clip in track.clips), key=lambda clip: (clip.timeline_start_frame, clip.id))
     if not clips:
         raise ValidationError("Cannot render a timeline with no clips")

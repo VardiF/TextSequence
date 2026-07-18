@@ -21,7 +21,8 @@ The current server exposes exactly these 11 tools:
 
 Returns safe project summaries ordered deterministically:
 
-`project_id`, `name`, `revision`, rational `fps`, and `clip_count`.
+`project_id`, `name`, `revision`, `revision_id`, `timeline_id`, rational `fps`,
+and `clip_count`.
 
 ### `get_timeline(project_id)`
 

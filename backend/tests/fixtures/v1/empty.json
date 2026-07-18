@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "id": "project_v1_empty",
+  "name": "V1 empty",
+  "fps": null,
+  "revision": 0,
+  "assets": [],
+  "tracks": [{"id": "track_v1_empty", "name": "V1", "kind": "video", "clips": []}]
+}

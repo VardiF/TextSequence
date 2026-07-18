@@ -1,0 +1,8 @@
+{
+  "id": "project_v1_revision_8",
+  "name": "V1 revision eight",
+  "fps": {"numerator": 24, "denominator": 1},
+  "revision": 8,
+  "assets": [],
+  "tracks": [{"id": "track_revision_8", "name": "V1", "kind": "video", "clips": []}]
+}

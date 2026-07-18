@@ -59,11 +59,11 @@ class EditorContextStore:
         visible_track = snapshot.get("visible_track_id")
         if selected is not None:
             self._validate_id(selected, "selected_clip_id")
-            if not any(clip.id == selected for track in project.tracks for clip in track.clips):
+            if not any(clip.id == selected for track in project.timeline.tracks for clip in track.clips):
                 raise EditorContextError("INVALID_SELECTION", "Selected clip does not exist in the current project")
         if visible_track is not None:
             self._validate_id(visible_track, "visible_track_id")
-            if not any(track.id == visible_track for track in project.tracks):
+            if not any(track.id == visible_track for track in project.timeline.tracks):
                 raise EditorContextError("INVALID_ARGUMENT", "Visible track does not exist in the current project")
         context = EditorContext(session_id, project_id, revision, selected, playhead, visible_track,
                                 datetime.now(timezone.utc).isoformat())
@@ -82,7 +82,7 @@ class EditorContextStore:
         except (FileNotFoundError, ValidationError) as exc:
             raise EditorContextError("PROJECT_NOT_FOUND", "Active project no longer exists") from exc
         selected_exists = context.selected_clip_id is None or any(
-            clip.id == context.selected_clip_id for track in project.tracks for clip in track.clips
+        clip.id == context.selected_clip_id for track in project.timeline.tracks for clip in track.clips
         )
         if not selected_exists:
             raise EditorContextError("INVALID_SELECTION", "The selected clip no longer exists")
@@ -97,4 +97,3 @@ class EditorContextStore:
             "visible_track_id": context.visible_track_id,
             "captured_at": context.captured_at,
         }
-

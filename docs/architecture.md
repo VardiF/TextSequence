@@ -18,11 +18,18 @@ flowchart TD
 ## Boundaries
 
 - **Canonical Project State:** `Project`, `Asset`, `Track`, and `Clip` models
-  are serialized to validated JSON with stable opaque IDs.
+  are serialized to validated schema-v2 JSON with stable opaque IDs. The
+  canonical shape is `Project.timeline.tracks`; top-level REST `tracks` is only
+  a compatibility alias.
 - **Timeline Domain Operations:** framework-independent split, delete, move,
   trim, and silence-removal operations validate frame bounds and collisions.
-- **ProjectService:** loads authoritative state, serializes per-project
-  mutations, checks expected revisions, and saves one authoritative result.
+- **ProjectService:** loads authoritative state, clones it, applies a domain
+  transformation, checks expected revisions, allocates the next integer
+  revision and immutable `revision_id`, and commits one authoritative result.
+- **Revision Store:** new projects use `projects/{id}/head.json` plus immutable
+  full snapshots in `revisions/`. Legacy flat v1 files are migrated in memory
+  and promoted only on the first successful mutation; the original is retained
+  as `legacy-v1.json`.
 - **REST Adapter:** provides browser-facing project, media, editing, render,
   and silence endpoints without duplicating domain rules.
 - **MCP Adapter:** exposes the same service through Streamable HTTP. It returns
@@ -46,7 +53,7 @@ sequenceDiagram
     participant F as Local FFmpeg
     H->>S: Import or edit with expected revision
     A->>S: Inspect or mutate through MCP
-    S->>P: Load, validate, atomically save
+    S->>P: Load HEAD, validate, commit immutable snapshot and HEAD
     S->>F: Compile and render requested revision
     S-->>H: Authoritative project / render result
     S-->>A: Safe projection / mutation result

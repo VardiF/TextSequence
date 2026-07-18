@@ -6,7 +6,8 @@ type FrameRate = { numerator: number; denominator: number };
 type Asset = { id: string; path: string; name: string; codec: string; width: number; height: number; fps: FrameRate; duration_frames: number };
 type Clip = { id: string; asset_id: string; source_in_frame: number; source_out_frame: number; timeline_start_frame: number };
 type Track = { id: string; name: string; clips: Clip[] };
-type Project = { id: string; name: string; revision: number; fps: FrameRate | null; assets: Asset[]; tracks: Track[] };
+type Timeline = { id: string; name: string; external_refs: unknown[]; tracks: Track[]; markers: unknown[] };
+type Project = { schema_version: number; id: string; name: string; revision: number; revision_id: string; external_refs: unknown[]; fps: FrameRate | null; assets: Asset[]; timeline: Timeline };
 type TrimEdge = 'in' | 'out';
 type TrimPreview = { clipId: string; sourceInFrame: number; sourceOutFrame: number };
 type MovePreview = { clipId: string; timelineStartFrame: number };
@@ -61,7 +62,7 @@ function App() {
   const [silenceBusy, setSilenceBusy] = useState(false);
   const video = useRef<HTMLVideoElement>(null);
   const asset = project?.assets[0];
-  const clips = project?.tracks[0]?.clips ?? [];
+  const clips = project?.timeline.tracks[0]?.clips ?? [];
   const selectedClip = clips.find((clip) => clip.id === selectedClipId) ?? null;
   const fps = fpsValue(project);
   const timelineDuration = Math.max(1, asset?.duration_frames ?? 1, ...clips.map((clip) => clip.timeline_start_frame + clipDuration(clip)));
@@ -102,7 +103,7 @@ function App() {
 
   const refresh = (next: Project, selection: string | null = selectedClipId) => {
     setProject(next);
-    setSelectedClipId(selection && next.tracks[0]?.clips.some((clip) => clip.id === selection) ? selection : null);
+    setSelectedClipId(selection && next.timeline.tracks[0]?.clips.some((clip) => clip.id === selection) ? selection : null);
     setRenderedPreview(null);
     setExportedMedia(null);
     setRenderState('idle');
@@ -164,7 +165,7 @@ function App() {
         method: 'POST',
         body: JSON.stringify({ editor_session_id: editorSessionId, message, editor_context: {
           editor_session_id: editorSessionId, project_id: project.id, observed_revision: project.revision,
-          selected_clip_id: selectedClipId, playhead_frame: frame, visible_track_id: project.tracks[0]?.id ?? null,
+          selected_clip_id: selectedClipId, playhead_frame: frame, visible_track_id: project.timeline.tracks[0]?.id ?? null,
         } }),
       });
       setChatMessages((current) => [...current, { role: 'assistant', text: response.message, actions: response.actions ?? [] }]);
@@ -263,7 +264,7 @@ function App() {
   };
 
   return <main>
-    <header><h1>TextSequence</h1><span>v0.1.2 · MCP-native NLE</span></header>
+    <header><h1>TextSequence</h1><span>v0.2.0 · MCP-native NLE</span></header>
     <section className="toolbar"><button onClick={create}>New project</button><button onClick={open}>Open latest</button><input value={path} onChange={(event) => setPath(event.target.value)} placeholder="Absolute path to a video" /><button onClick={importAsset} disabled={!project || !path}>Import video</button><button onClick={split} disabled={!selectedClip}>Split</button><button onClick={remove} disabled={!selectedClip}>Delete</button><button onClick={() => void renderProject('preview')} disabled={!project || renderState === 'rendering'}>{renderState === 'rendering' ? 'Rendering…' : 'Render Preview'}</button><button onClick={() => void renderProject('export')} disabled={!project || renderState === 'rendering'}>Export MP4</button></section>
     <section className="connections"><h2>Agent connections</h2><div className="connection-row"><div><strong>TextSequence MCP</strong><span className="status ready">● {health?.mcp.status === 'running' ? 'Running' : 'Checking'}</span><p>{health?.mcp.transport ?? 'Streamable HTTP'}</p><p><strong>Available tools: {health?.mcp.tool_count ?? 11}</strong></p><code>{health?.mcp.endpoint ?? 'http://127.0.0.1:8000/mcp'}</code></div><button onClick={() => void navigator.clipboard?.writeText(health?.mcp.endpoint ?? 'http://127.0.0.1:8000/mcp')}>Copy MCP URL</button></div><div className="connection-row"><div><strong>Built-in assistant</strong><span className={`status ${health?.built_in_assistant.configured ? 'ready' : 'optional'}`}>● {health?.built_in_assistant.configured ? 'Ready' : 'Optional · Not configured'}</span><p>{health?.built_in_assistant.configured ? 'OpenAI Agents SDK' : 'Optional for core editing. Connect an external MCP agent or configure OPENAI_API_KEY.'}</p></div></div></section>
     {error && <p className="error">{error}</p>}
