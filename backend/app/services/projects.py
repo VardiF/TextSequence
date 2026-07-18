@@ -1,0 +1,183 @@
+from __future__ import annotations
+
+from copy import deepcopy
+from pathlib import Path
+from threading import Lock, RLock
+from typing import Optional
+
+from app.domain.models import ValidationError
+from app.domain.silence import SourceRemovalRange, apply_silence_removals
+from app.audio.silence import AssetSilenceAnalysis, SilenceAnalysisError, analyze_asset, milliseconds_to_frames, silence_dict, validate_parameters
+from app.domain.operations import delete_clip, move_clip, new_project, register_asset, split_clip, trim_clip
+from app.media.probe import probe_media
+from app.persistence.project_store import ProjectStore, StaleRevisionError
+from app.rendering.ffmpeg import RenderResult, render_plan
+from app.rendering.plan import compile_render_plan
+from app.services.timeline import timeline_projection
+
+
+class ProjectService:
+    def __init__(self, store: Optional[ProjectStore] = None, runtime_root: Optional[Path] = None) -> None:
+        self.store = store or ProjectStore()
+        self.runtime_root = runtime_root or Path("runtime")
+        self._locks: dict[str, RLock] = {}
+        self._locks_guard = Lock()
+
+    def _project_lock(self, project_id: str) -> RLock:
+        self.store.path_for(project_id)
+        with self._locks_guard:
+            return self._locks.setdefault(project_id, RLock())
+
+    def create(self, name: str):
+        project = new_project(name)
+        return self.store.save(project)
+
+    def get(self, project_id: str): return self.store.load(project_id)
+    def list(self): return self.store.list()
+    def list_summaries(self):
+        return [{"project_id": p.id, "name": p.name, "revision": p.revision,
+                 "fps": {"numerator": p.fps.numerator, "denominator": p.fps.denominator} if p.fps else None,
+                 "clip_count": sum(len(t.clips) for t in p.tracks)}
+                for p in sorted(self.store.list(), key=lambda item: (item.name, item.id))]
+    def timeline(self, project_id: str): return timeline_projection(self.store.load(project_id))
+
+    @staticmethod
+    def _analysis_output(project_id: str, revision: int, analyses: list[AssetSilenceAnalysis], minimum_silence_ms: int, noise_threshold_db: float) -> dict:
+        silences = []
+        for analysis in analyses:
+            for silence in analysis.silences:
+                silences.append({"asset_id": analysis.asset_id, "start_frame": silence.start_frame,
+                                 "end_frame": silence.end_frame, "duration_frames": silence.duration_frames})
+        return {"project_id": project_id, "revision": revision,
+                "minimum_silence_ms": minimum_silence_ms, "noise_threshold_db": noise_threshold_db,
+                "silences": silences, "summary": {"detected_silences": len(silences),
+                "total_silence_frames": sum(item["duration_frames"] for item in silences)}}
+
+    def _analyze_project_silence(self, project, minimum_silence_ms: int, noise_threshold_db: float) -> list[AssetSilenceAnalysis]:
+        validate_parameters(minimum_silence_ms, noise_threshold_db)
+        if not project.assets:
+            raise SilenceAnalysisError("NO_MEDIA", "Project has no imported media")
+        return [analyze_asset(asset, minimum_silence_ms, noise_threshold_db) for asset in project.assets]
+
+    def analyze_silence(self, project_id: str, minimum_silence_ms: int = 700, noise_threshold_db: float = -35) -> dict:
+        project = self.store.load(project_id)
+        analyses = self._analyze_project_silence(project, minimum_silence_ms, noise_threshold_db)
+        return self._analysis_output(project.id, project.revision, analyses, minimum_silence_ms, noise_threshold_db)
+
+    def remove_silence(self, project_id: str, expected_revision: int, minimum_silence_ms: int = 700,
+                       noise_threshold_db: float = -35, keep_padding_ms: int = 0) -> dict:
+        validate_parameters(minimum_silence_ms, noise_threshold_db, keep_padding_ms)
+        initial = self.store.load(project_id)
+        analyses = self._analyze_project_silence(initial, minimum_silence_ms, noise_threshold_db)
+        padding_frames = milliseconds_to_frames(keep_padding_ms, initial.fps.as_tuple()) if initial.fps else 0
+        removals: list[SourceRemovalRange] = []
+        detected = []
+        for analysis in analyses:
+            for silence in analysis.silences:
+                detected.append({"asset_id": analysis.asset_id, "start_frame": silence.start_frame,
+                                 "end_frame": silence.end_frame, "duration_frames": silence.duration_frames})
+                start, end = silence.start_frame + padding_frames, silence.end_frame - padding_frames
+                if end > start:
+                    removals.append(SourceRemovalRange(analysis.asset_id, start, end))
+        with self._project_lock(project_id):
+            current = self.store.load(project_id)
+            if current.revision != expected_revision:
+                raise StaleRevisionError("Project revision is stale", current.revision)
+            edited, removed_frames, removed_count, applied = apply_silence_removals(current, removals)
+            previous_revision = current.revision
+            if removed_frames:
+                saved = self.store.save(edited, expected_revision=expected_revision)
+                new_revision = saved.revision
+                resulting_clip_count = sum(len(track.clips) for track in saved.tracks)
+                project_result = saved
+            else:
+                new_revision = previous_revision
+                resulting_clip_count = sum(len(track.clips) for track in current.tracks)
+                project_result = current
+        fps = current.fps.as_tuple() if current.fps else (1, 1)
+        removed_duration_ms = round(removed_frames * 1000 * fps[1] / fps[0])
+        return {"ok": True, "project_id": project_id, "previous_revision": previous_revision,
+                "revision": new_revision, "minimum_silence_ms": minimum_silence_ms,
+                "noise_threshold_db": noise_threshold_db, "keep_padding_ms": keep_padding_ms,
+                "detected_silences": len(detected), "removed_silences": removed_count,
+                "removed_frames": removed_frames, "removed_duration_ms": removed_duration_ms,
+                "resulting_clip_count": resulting_clip_count, "detected_ranges": detected,
+                "removed_ranges": applied, "project": project_result}
+
+    def media_path(self, project_id: str, asset_id: str) -> Path:
+        project = self.store.load(project_id)
+        for asset in project.assets:
+            if asset.id == asset_id: return Path(asset.path)
+        raise FileNotFoundError(f"Asset does not exist: {asset_id}")
+
+    def import_media(self, project_id: str, path: str):
+        asset = probe_media(path)
+        with self._project_lock(project_id):
+            project = self.store.load(project_id)
+            register_asset(project, asset)
+            return self.store.save(project, expected_revision=project.revision - 1)
+
+    def _mutate(self, project_id: str, expected_revision: int, operation, *args, **kwargs):
+        with self._project_lock(project_id):
+            project = self.store.load(project_id)
+            if project.revision != expected_revision:
+                raise StaleRevisionError("Project revision is stale", project.revision)
+            edited = operation(project, *args, **kwargs)
+            return self.store.save(edited, expected_revision=expected_revision)
+
+    def split(self, project_id, clip_id, timeline_frame, expected_revision): return self._mutate(project_id, expected_revision, split_clip, clip_id, timeline_frame)
+    def delete(self, project_id, clip_id, expected_revision): return self._mutate(project_id, expected_revision, delete_clip, clip_id)
+    def move(self, project_id, clip_id, timeline_start_frame, expected_revision): return self._mutate(project_id, expected_revision, move_clip, clip_id, timeline_start_frame)
+    def trim(self, project_id, clip_id, expected_revision, source_in_frame=None, source_out_frame=None): return self._mutate(project_id, expected_revision, trim_clip, clip_id, source_in_frame, source_out_frame)
+
+    def trim_relative(self, project_id, clip_id, expected_revision, edge, frames_to_remove):
+        if edge not in ("start", "end") or not isinstance(frames_to_remove, int) or frames_to_remove <= 0:
+            raise ValidationError("edge must be start or end and frames_to_remove must be positive")
+        with self._project_lock(project_id):
+            project = self.store.load(project_id)
+            if project.revision != expected_revision: raise StaleRevisionError("Project revision is stale", project.revision)
+            clip = next((c for t in project.tracks for c in t.clips if c.id == clip_id), None)
+            if clip is None: raise ValidationError(f"Clip does not exist: {clip_id}")
+            if edge == "start": result = trim_clip(project, clip_id, clip.source_in_frame + frames_to_remove, None)
+            else: result = trim_clip(project, clip_id, None, clip.source_out_frame - frames_to_remove)
+            return self.store.save(result, expected_revision=expected_revision)
+
+    def move_to_gap(self, project_id, clip_id, gap_ordinal, expected_revision):
+        if not isinstance(gap_ordinal, int) or gap_ordinal < 1: raise ValidationError("gap_ordinal must be positive")
+        with self._project_lock(project_id):
+            project = self.store.load(project_id)
+            if project.revision != expected_revision: raise StaleRevisionError("Project revision is stale", project.revision)
+            for track in project.tracks:
+                clip = next((c for c in track.clips if c.id == clip_id), None)
+                if clip:
+                    without = deepcopy(project)
+                    target = next(t for t in without.tracks if t.id == track.id)
+                    target.clips = [c for c in target.clips if c.id != clip_id]
+                    gaps = next(t["gaps"] for t in timeline_projection(without)["tracks"] if t["id"] == track.id)
+                    gap = next((g for g in gaps if g["gap_ordinal"] == gap_ordinal), None)
+                    if gap is None: raise ValidationError("Gap does not exist")
+                    result = move_clip(project, clip_id, gap["start_frame"])
+                    return self.store.save(result, expected_revision=expected_revision)
+            raise ValidationError(f"Clip does not exist: {clip_id}")
+
+    def render(self, project_id: str, expected_revision: int, render_type: str) -> RenderResult:
+        if render_type not in ("preview", "export"): raise ValidationError("Unknown render type")
+        with self._project_lock(project_id):
+            project = self.store.load(project_id)
+            if project.revision != expected_revision: raise StaleRevisionError("Project revision is stale", project.revision)
+            plan = compile_render_plan(project)
+            revision = project.revision
+            folder = self.runtime_root / project.id / ("previews" if render_type == "preview" else "exports")
+        return render_plan(plan, folder / f"revision-{revision}.mp4", revision, render_type)
+    def render_preview(self, project_id, expected_revision): return self.render(project_id, expected_revision, "preview")
+    def export_project(self, project_id, expected_revision): return self.render(project_id, expected_revision, "export")
+    def render_path(self, project_id, render_type, revision):
+        if render_type not in ("preview", "export"): raise ValidationError("Unknown render type")
+        return self.runtime_root / project_id / ("previews" if render_type == "preview" else "exports") / f"revision-{revision}.mp4"
+
+    def current_render(self, project_id: str, render_type: str):
+        project = self.store.load(project_id)
+        path = self.render_path(project_id, render_type, project.revision)
+        if not path.is_file(): raise FileNotFoundError("Current rendered media does not exist")
+        return {"revision": project.revision, "render_type": render_type,
+                "url": f"/api/projects/{project_id}/renders/{render_type}/{project.revision}"}
