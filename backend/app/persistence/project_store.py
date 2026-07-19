@@ -229,12 +229,37 @@ class ProjectStore:
         candidate.validate()
         record = self._record_for(candidate, parent_revision_id, origin, actor, operation, summary)
         directory = self.directory_for(candidate.id)
+        promoted = False
+        revision_written = False
         if loaded.source == "legacy" and not directory.exists():
             self._install_legacy_baseline(loaded)
+            promoted = True
         if not directory.is_dir():
             raise ValidationError("Project directory is unavailable for commit")
-        self._write_revision(directory, record)
-        self._write_head(directory, candidate)
+        revision_path = directory / "revisions" / f"{record.metadata.revision_id}.json"
+        revision_preexisted = revision_path.exists()
+        head_path = directory / "head.json"
+        previous_head = head_path.read_bytes()
+        try:
+            self._write_revision(directory, record)
+            revision_written = True
+            self._write_head(directory, candidate)
+        except Exception:
+            # A failed HEAD replacement must not leave a newly-written candidate
+            # reachable by accident. A legacy promotion created by this commit
+            # is also safe to remove because the original flat file remains.
+            try:
+                self._write_bytes(head_path, previous_head)
+            except Exception:
+                pass
+            if (revision_written or revision_path.exists()) and not revision_preexisted:
+                try:
+                    revision_path.unlink()
+                except FileNotFoundError:
+                    pass
+            if promoted and operation == "transaction":
+                shutil.rmtree(directory, ignore_errors=True)
+            raise
         return candidate
 
     def save(self, project: Project, expected_revision: Optional[int] = None) -> Project:

@@ -42,7 +42,8 @@ flowchart TD
   and silence endpoints without duplicating domain rules.
 - **MCP Adapter:** exposes the same service through Streamable HTTP. It returns
   safe projections and never exposes source paths through timeline inspection.
-  v0.2.3 adds the typed `query_timeline` and `diff_revisions` tools; eight
+  v0.3.0 adds stateless `prepare_transaction` and `commit_transaction` tools;
+  v0.2.3 added the typed `query_timeline` and `diff_revisions` tools; eight
   read-only Resources and REST reads reuse the same safe read boundaries.
 - **Read Surface:** project, timeline, asset, clip, marker, and revision
   projections are transport-neutral. Revision reads walk only the chain
@@ -52,6 +53,15 @@ flowchart TD
   HEAD-reachable history load, then calls a pure explicit-field comparator. It
   never compares raw snapshot dictionaries, mutates persistence, or emits
   source locations.
+- **Transactions:** preparation parses a strict seven-operation union, resolves
+  stable IDs and earlier `result_ref` bindings, allocates deterministic IDs,
+  and runs the domain operations on a deep copy. It returns the same pure
+  `diff_projects` dry-run surface used by commit. Commit reloads the base under
+  the existing per-project lock, re-executes the prepared operations, checks
+  the base revision and revision ID, and writes exactly one `transaction`
+  revision. There is no transaction database, reservation, rebase, or schema
+  migration; a SHA-256 transaction hash is an integrity check rather than
+  authentication.
 - **FFmpeg Render Plan:** compiles canonical clips and gaps into a deterministic
   local FFmpeg command for preview or export.
 

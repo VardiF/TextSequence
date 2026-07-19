@@ -15,7 +15,7 @@ The MCP endpoint remains available without `OPENAI_API_KEY`.
 
 ## Available tools
 
-The current server exposes exactly these 16 tools:
+The current server exposes exactly these 18 tools:
 
 ### `list_projects()`
 
@@ -125,6 +125,44 @@ Only approved canonical fields are compared. Asset source-location changes are
 reported as a redacted `/source_location` field and never include path values.
 Missing or unreachable revisions return `REVISION_NOT_FOUND`; legacy flat
 projects without promoted history return `HISTORY_UNAVAILABLE`.
+
+### `prepare_transaction(project_id, expected_revision, operations)`
+
+Prepares an ordered, stateless batch without writing HEAD, revision files, or
+promoting a legacy project. The strict request contains `expected_revision` and
+one to 100 operations. The only supported operation names are `split_clip`,
+`move_clip`, `trim_clip`, `delete_clip`, `add_marker`, `update_marker`, and
+`delete_marker`. Move uses an absolute `timeline_start_frame`; trim uses one or
+both source bounds and preserves exclusive `source_out_frame` semantics.
+
+`split_clip` and `add_marker` require a unique `result_ref`; a later operation
+may refer to that earlier result with `{ "kind": "result", "ref": "..." }`.
+References cannot point forward, be duplicated, or change entity type. IDs for
+created clips and markers are deterministic for the same project base and
+request. The response includes `prepared_transaction`, `operation_results`, a
+SHA-256 `transaction_hash`, and a dry-run `diff` with the same summary and
+changes shape as `diff_revisions`. Repeating preparation against the same base
+returns the same hash and IDs. The hash checks payload integrity; it is not
+authentication.
+
+### `commit_transaction(project_id, transaction_hash, prepared_transaction)`
+
+Commits the exact prepared payload only when the authoritative project still
+has the same base revision and `revision_id`. The service re-executes the
+resolved operations under the existing per-project lock and does not trust
+client-supplied candidate state, results, or diffs. A successful non-empty
+transaction creates exactly one normal revision with operation `transaction`
+and summary `Apply transaction (N operations)`. A stale base returns
+`REVISION_CONFLICT`; there is no automatic rebase. Invalid operations,
+operation failures, net-zero batches, integrity failures, and persistence
+failures use stable sanitized error codes and never expose local paths or raw
+exceptions.
+
+Preparation and commit are dry-run/commit equivalents: their operation
+results, generated IDs, canonical changes, and summary match the revision diff
+from the base revision to the committed revision. Transactions are local,
+vendor-neutral, and have no persistent prepared-transaction store or schema
+migration.
 
 ## Read-only Resources
 

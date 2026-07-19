@@ -217,7 +217,7 @@ def test_rest_and_mcp_diff_surfaces_return_safe_machine_readable_results(tmp_pat
     legacy_content, structured = diff_tool.fn_metadata.convert_result(result)
     assert json.loads(legacy_content[0].text)["summary"] == result["summary"]
     assert structured["result"]["summary"] == result["summary"]
-    assert len(mcp._tool_manager.list_tools()) == 16
+    assert len(mcp._tool_manager.list_tools()) == 18
 
 
 def _change_asset_path(candidate, path):

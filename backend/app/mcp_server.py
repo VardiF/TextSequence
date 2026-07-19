@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
 from app.application import application
 from app.agent.context import EditorContextError
@@ -14,12 +15,15 @@ from app.mcp_resources import register_resources
 from app.persistence.project_store import RevisionNotFoundError
 from app.revision_diff_models import RevisionDiffErrorOutput, RevisionDiffResult
 from app.services.revision_diff import RevisionDiffError
+from app.services.transactions import TransactionError
+from app.transaction_models import CommitTransactionOutput, PrepareTransactionOutput, TransactionErrorOutput
 
 mcp = FastMCP("TextSequence", instructions="Local-first TextSequence project collaboration.", streamable_http_path="/")
 
 
 def _error(exc: Exception) -> dict[str, Any]:
-    if isinstance(exc, StaleRevisionError): code = "STALE_REVISION"
+    if isinstance(exc, TransactionError): code = exc.code
+    elif isinstance(exc, StaleRevisionError): code = "STALE_REVISION"
     elif isinstance(exc, TimelineConflictError): code = "TIMELINE_CONFLICT"
     elif isinstance(exc, RevisionNotFoundError): code = "REVISION_NOT_FOUND"
     elif isinstance(exc, RevisionDiffError): code = exc.code
@@ -38,12 +42,22 @@ def _error(exc: Exception) -> dict[str, Any]:
         "NO_CHANGES": "The requested operation would not change the project",
         "REVISION_NOT_FOUND": "Revision does not exist",
         "HISTORY_UNAVAILABLE": "Revision history is unavailable for this project",
-        "INTEGRITY_ERROR": "Revision history integrity validation failed",
         "INVALID_ARGUMENT": "Invalid argument",
+        "INVALID_TRANSACTION": "Invalid transaction",
+        "OPERATION_FAILED": "Transaction operation failed",
+        "NO_CHANGES": "The transaction would not change the project",
+        "INTEGRITY_ERROR": "Project integrity validation failed",
+        "PERSISTENCE_ERROR": "Transaction could not be persisted",
+        "REVISION_CONFLICT": "Project revision is no longer the prepared base",
     }
     result = {"ok": False, "error": {"code": code, "message": messages.get(code, "Invalid argument")}}
     if isinstance(exc, StaleRevisionError) and exc.current_revision is not None:
         result["error"]["current_revision"] = exc.current_revision
+    if isinstance(exc, TransactionError):
+        for key in ("operation_index", "operation", "cause_code", "current_revision", "current_revision_id"):
+            value = getattr(exc, key, None)
+            if value is not None:
+                result["error"][key] = value
     return result
 
 
@@ -194,6 +208,34 @@ def query_timeline(project_id: str, query: dict[str, Any]) -> QueryOutput | McpR
 def diff_revisions(project_id: str, from_revision_id: str, to_revision_id: str) -> RevisionDiffResult | RevisionDiffErrorOutput:
     try:
         return application.projects.diff_revisions(project_id, from_revision_id, to_revision_id).model_dump(mode="json")
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True),
+    structured_output=True,
+)
+def prepare_transaction(project_id: str, expected_revision: int, operations: list[dict[str, Any]]) -> PrepareTransactionOutput | TransactionErrorOutput:
+    try:
+        return application.projects.prepare_transaction(
+            project_id, {"expected_revision": expected_revision, "operations": operations}
+        ).model_dump(mode="json")
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False),
+    structured_output=True,
+)
+def commit_transaction(project_id: str, transaction_hash: str, prepared_transaction: dict[str, Any]) -> CommitTransactionOutput | TransactionErrorOutput:
+    try:
+        return application.projects.commit_transaction(
+            project_id,
+            {"transaction_hash": transaction_hash, "prepared_transaction": prepared_transaction},
+            origin="mcp", actor={"type": "agent"},
+        ).model_dump(mode="json")
     except Exception as exc:
         return _error(exc)
 

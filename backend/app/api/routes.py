@@ -17,6 +17,7 @@ from app.persistence.project_store import RevisionNotFoundError
 from app.services.projections import revision_metadata_projection, revision_projection
 from app.services.query import QueryValidationError
 from app.services.revision_diff import RevisionDiffError
+from app.services.transactions import TransactionError
 from copy import deepcopy
 
 router = APIRouter(prefix="/api")
@@ -131,7 +132,7 @@ def health():
     return {
         "status": "ok",
         "ffprobe": {"available": bool(ffprobe), "path": ffprobe},
-        "mcp": {"status": "running", "endpoint": "http://127.0.0.1:8000/mcp", "transport": "Streamable HTTP", "tool_count": 16, "resource_count": 8},
+        "mcp": {"status": "running", "endpoint": "http://127.0.0.1:8000/mcp", "transport": "Streamable HTTP", "tool_count": 18, "resource_count": 8},
         "built_in_assistant": {"configured": agent_runtime.configured()},
     }
 
@@ -212,6 +213,40 @@ def query_timeline_route(project_id: str, request: dict):
         raise HTTPException(400, {"code": "INVALID_QUERY", "message": str(exc)}) from exc
     except ValidationError as exc:
         raise _rest_project_read_error(exc) from exc
+
+
+def _transaction_http_error(exc: TransactionError) -> HTTPException:
+    status = 409 if exc.code == "REVISION_CONFLICT" else 500 if exc.code in {"INTEGRITY_ERROR", "PERSISTENCE_ERROR"} else 400
+    detail = {"code": exc.code, "message": exc.message}
+    for key in ("operation_index", "operation", "cause_code", "current_revision", "current_revision_id"):
+        value = getattr(exc, key, None)
+        if value is not None:
+            detail[key] = value
+    return HTTPException(status, detail)
+
+
+@router.post("/projects/{project_id}/transactions/prepare")
+def prepare_transaction(project_id: str, request: dict):
+    try:
+        return service.prepare_transaction(project_id, request)
+    except TransactionError as exc:
+        raise _transaction_http_error(exc) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(404, {"code": "PROJECT_NOT_FOUND", "message": "Project does not exist"}) from exc
+    except ValidationError as exc:
+        raise HTTPException(400, {"code": "INVALID_TRANSACTION", "message": "Transaction request is invalid"}) from exc
+
+
+@router.post("/projects/{project_id}/transactions/commit")
+def commit_transaction(project_id: str, request: dict):
+    try:
+        return service.commit_transaction(project_id, request, origin="rest", actor={"type": "human"})
+    except TransactionError as exc:
+        raise _transaction_http_error(exc) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(404, {"code": "PROJECT_NOT_FOUND", "message": "Project does not exist"}) from exc
+    except ValidationError as exc:
+        raise HTTPException(400, {"code": "INVALID_TRANSACTION", "message": "Transaction request is invalid"}) from exc
 
 
 @router.get("/projects/{project_id}/revisions")
