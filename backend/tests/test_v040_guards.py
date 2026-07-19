@@ -207,6 +207,140 @@ def test_corrupt_guard_state_fails_closed_without_revision_change(tmp_path: Path
     assert service.get(project.id).revision == project.revision
 
 
+@pytest.mark.parametrize("range_value", [
+    {"start_frame": True, "end_frame": 2},
+    {"start_frame": 0, "end_frame": False},
+    {"start_frame": 0.0, "end_frame": 2},
+    {"start_frame": "0", "end_frame": 2},
+    {"start_frame": None, "end_frame": 2},
+    {"start_frame": -1, "end_frame": 2},
+    {"start_frame": 2, "end_frame": 2},
+    {"start_frame": 3, "end_frame": 2},
+    {"end_frame": 2},
+    {"start_frame": 0},
+    {"start_frame": 0, "end_frame": 2, "unexpected": True},
+])
+def test_persisted_malformed_range_fails_closed_before_canonical_mutation(tmp_path: Path, range_value: dict):
+    service, project = make_service(tmp_path)
+    clip = project.timeline.tracks[0].clips[0] if project.timeline.tracks[0].clips else None
+    if clip is None:
+        project = add_media(service, project, tmp_path)
+        clip = project.timeline.tracks[0].clips[0]
+    state_path = tmp_path / "runtime" / "guards" / f"{project.id}.json"
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(json.dumps({
+        "guard_schema_version": 1,
+        "project_id": project.id,
+        "guards": [{
+            "guard_id": "guard_" + "a" * 32,
+            "project_id": project.id,
+            "owner": {"type": "human", "id": "persisted-test"},
+            "scope": {"kind": "selection", "clip_ids": [], "marker_ids": [], "frame_ranges": [range_value]},
+            "purpose": None,
+            "created_at": "2026-01-01T00:00:00Z",
+            "expires_at": "2030-01-01T00:00:00Z",
+            "capability_sha256": "b" * 64,
+        }],
+    }))
+    before = service.get(project.id)
+    with pytest.raises(GuardStateError) as failure:
+        service.move(project.id, clip.id, 12, before.revision)
+    assert failure.value.code == "GUARD_STATE_ERROR"
+    after = service.get(project.id)
+    assert (after.revision, after.revision_id) == (before.revision, before.revision_id)
+    assert len(service.store.reachable_revisions(project.id)[1]) == before.revision + 1
+
+
+def test_persisted_bool_range_rejects_all_representative_canonical_paths(tmp_path: Path, monkeypatch):
+    service, project = make_service(tmp_path)
+    project = add_media(service, project, tmp_path)
+    clip = project.timeline.tracks[0].clips[0]
+    target_revision_id = project.revision_id
+    target = service._commit_operation(project.id, project.revision,
+                                       lambda candidate: candidate, "system", {"type": "system"}, "noop", "noop")
+    changed = service._commit_operation(
+        project.id, target.revision,
+        lambda candidate: setattr(candidate, "name", "Changed") or candidate,
+        "system", {"type": "system"}, "rename", "Rename",
+    )
+    state_path = tmp_path / "runtime" / "guards" / f"{project.id}.json"
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(json.dumps({
+        "guard_schema_version": 1,
+        "project_id": project.id,
+        "guards": [{
+            "guard_id": "guard_" + "c" * 32,
+            "project_id": project.id,
+            "owner": {"type": "human", "id": "persisted-test"},
+            "scope": {"kind": "selection", "clip_ids": [], "marker_ids": [],
+                      "frame_ranges": [{"start_frame": True, "end_frame": 2}]},
+            "purpose": None,
+            "created_at": "2026-01-01T00:00:00Z",
+            "expires_at": "2030-01-01T00:00:00Z",
+            "capability_sha256": "d" * 64,
+        }],
+    }))
+    before = service.get(project.id)
+    request = {"expected_revision": before.revision,
+               "operations": [{"op": "move_clip", "clip": {"kind": "id", "id": clip.id},
+                                "timeline_start_frame": 12}]}
+    prepared = service.prepare_transaction(project.id, request)
+    with pytest.raises(TransactionError) as transaction_failure:
+        service.commit_transaction(project.id, {
+            "transaction_hash": prepared.transaction_hash,
+            "prepared_transaction": prepared.prepared_transaction.model_dump(mode="json"),
+        })
+    assert transaction_failure.value.code == "GUARD_STATE_ERROR"
+
+    with pytest.raises(RestoreError) as restore_failure:
+        service.restore_revision(project.id, target_revision_id,
+                                  {"expected_revision": changed.revision,
+                                  "expected_revision_id": changed.revision_id})
+    assert restore_failure.value.code == "GUARD_STATE_ERROR"
+
+    import_project = service.create("Import guard state")
+    import_state_path = tmp_path / "runtime" / "guards" / f"{import_project.id}.json"
+    import_state_path.write_text(state_path.read_text().replace(project.id, import_project.id))
+    monkeypatch.setattr("app.services.projects.probe_media", lambda path: Asset(
+        "asset_import", path, "import.mp4", "h264", 320, 180, FrameRate(24, 1), 48,
+    ))
+    with pytest.raises(GuardStateError):
+        service.import_media(import_project.id, str(tmp_path / "import.mp4"))
+    assert service.get(project.id).revision == changed.revision
+
+
+def test_rest_sanitizes_persisted_range_state_failure(tmp_path: Path, monkeypatch):
+    service, project = make_service(tmp_path)
+    project = add_media(service, project, tmp_path)
+    clip = project.timeline.tracks[0].clips[0]
+    state_path = tmp_path / "runtime" / "guards" / f"{project.id}.json"
+    state_path.parent.mkdir(parents=True)
+    raw = {
+        "guard_schema_version": 1,
+        "project_id": project.id,
+        "guards": [{
+            "guard_id": "guard_" + "e" * 32,
+            "project_id": project.id,
+            "owner": {"type": "human", "id": "persisted-test"},
+            "scope": {"kind": "selection", "clip_ids": [], "marker_ids": [],
+                      "frame_ranges": [{"start_frame": True, "end_frame": 2}]},
+            "purpose": None,
+            "created_at": "2026-01-01T00:00:00Z",
+            "expires_at": "2030-01-01T00:00:00Z",
+            "capability_sha256": "f" * 64,
+        }],
+    }
+    state_path.write_text(json.dumps(raw))
+    monkeypatch.setattr("app.api.routes.service", service)
+    response = TestClient(app).post(f"/api/projects/{project.id}/clips/move", json={
+        "clip_id": clip.id, "timeline_start_frame": 12, "expected_revision": project.revision,
+    })
+    assert response.status_code == 500
+    assert response.json()["detail"]["code"] == "GUARD_STATE_ERROR"
+    assert "/Users/" not in response.text and "/var/" not in response.text
+    assert "start_frame" not in response.text and "runtime" not in response.text
+
+
 @pytest.mark.parametrize("document", [
     {"guard_schema_version": 1, "project_id": "project_other", "guards": []},
     {"guard_schema_version": 1, "project_id": "project_test", "guards": [], "unexpected": True},

@@ -78,10 +78,21 @@ class GuardStore:
             clip_ids, marker_ids, ranges = scope_data["clip_ids"], scope_data["marker_ids"], scope_data["frame_ranges"]
             if not all(isinstance(item, str) and item for item in clip_ids + marker_ids):
                 raise ValueError("invalid selectors")
-            from app.guard_models import FrameRange, _merge_ranges
-            parsed = [FrameRange(item["start_frame"], item["end_frame"]) for item in ranges]
-            if any(item.start_frame < 0 or item.end_frame <= item.start_frame for item in parsed):
-                raise ValueError("invalid range")
+            from app.guard_models import FrameRange, _merge_ranges, _strict_frame
+            if not isinstance(ranges, list):
+                raise ValueError("invalid ranges")
+            parsed = []
+            for item in ranges:
+                if not isinstance(item, dict) or set(item) != {"start_frame", "end_frame"}:
+                    raise ValueError("invalid range")
+                try:
+                    start_frame = _strict_frame(item["start_frame"])
+                    end_frame = _strict_frame(item["end_frame"])
+                except GuardError as exc:
+                    raise ValueError("invalid range") from exc
+                if end_frame <= start_frame:
+                    raise ValueError("invalid range")
+                parsed.append(FrameRange(start_frame, end_frame))
             scope = GuardScope("selection", tuple(sorted(set(clip_ids))), tuple(sorted(set(marker_ids))), tuple(_merge_ranges(parsed)))
             if not scope.clip_ids and not scope.marker_ids and not scope.frame_ranges:
                 raise ValueError("empty selection")
