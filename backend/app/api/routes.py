@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -13,10 +13,20 @@ from app.agent.runtime import AgentConfigurationError, AgentRuntime
 from app.audio.silence import SilenceAnalysisError
 from app.media.probe import ProbeError, find_ffprobe
 from app.persistence.project_store import StaleRevisionError
+from copy import deepcopy
 
 router = APIRouter(prefix="/api")
 service = application.projects
 agent_runtime = AgentRuntime()
+
+
+def _rest_project(project):
+    data = project_to_dict(project)
+    # v1 clients may still read top-level tracks; persistence and the frontend use
+    # the canonical v2 timeline object.
+    data["tracks"] = deepcopy(data["timeline"]["tracks"])
+    data["timeline_id"] = data["timeline"]["id"]
+    return data
 
 
 class CreateProject(BaseModel):
@@ -118,7 +128,7 @@ def remove_silence(project_id: str, request: SilenceRemovalRequest):
     try:
         result = service.remove_silence(project_id, request.expected_revision, request.minimum_silence_ms,
                                         request.noise_threshold_db, request.keep_padding_ms)
-        return {key: (project_to_dict(value) if key == "project" else value) for key, value in result.items()}
+        return {key: (_rest_project(value) if key == "project" else value) for key, value in result.items()}
     except StaleRevisionError as exc:
         raise HTTPException(409, {"code": "STALE_REVISION", "message": str(exc), "current_revision": exc.current_revision}) from exc
     except (SilenceAnalysisError, FileNotFoundError, ValidationError) as exc:
@@ -127,18 +137,18 @@ def remove_silence(project_id: str, request: SilenceRemovalRequest):
 
 @router.get("/projects")
 def list_projects():
-    return [project_to_dict(project) for project in service.list()]
+    return [_rest_project(project) for project in service.list()]
 
 
 @router.post("/projects")
 def create_project(request: CreateProject):
-    return project_to_dict(service.create(request.name))
+    return _rest_project(service.create(request.name))
 
 
 @router.get("/projects/{project_id}")
 def get_project(project_id: str):
     try:
-        return project_to_dict(service.get(project_id))
+        return _rest_project(service.get(project_id))
     except (FileNotFoundError, ValidationError) as exc:
         raise HTTPException(404, str(exc)) from exc
 
@@ -157,11 +167,25 @@ def media(project_id: str, asset_id: str):
 @router.post("/projects/{project_id}/assets")
 def import_media(project_id: str, request: ImportMedia):
     try:
-        return project_to_dict(service.import_media(project_id, request.path))
+        return _rest_project(service.import_media(project_id, request.path, origin="rest", actor={"type": "human"}))
     except (FileNotFoundError, ProbeError, ValidationError) as exc:
         raise HTTPException(400, str(exc)) from exc
     except StaleRevisionError as exc:
         raise HTTPException(409, str(exc)) from exc
+
+
+@router.post("/projects/{project_id}/assets/upload")
+async def upload_media(project_id: str, file: UploadFile = File(...), expected_revision: int = Form(...)):
+    try:
+        project = await service.import_uploaded_media(project_id, file, expected_revision,
+                                                       origin="rest", actor={"type": "human"})
+        return _rest_project(project)
+    except StaleRevisionError as exc:
+        raise HTTPException(409, {"code": "STALE_REVISION", "message": str(exc),
+                                  "current_revision": exc.current_revision}) from exc
+    except (FileNotFoundError, ProbeError, ValidationError) as exc:
+        raise HTTPException(400, {"code": getattr(exc, "code", "INVALID_ARGUMENT"),
+                                  "message": str(exc)}) from exc
 
 
 def _mutation_error(exc: Exception) -> HTTPException:
@@ -175,7 +199,7 @@ def _mutation_error(exc: Exception) -> HTTPException:
 @router.post("/projects/{project_id}/clips/split")
 def split(project_id: str, request: SplitMutation):
     try:
-        return project_to_dict(service.split(project_id, request.clip_id, request.timeline_frame, request.expected_revision))
+        return _rest_project(service.split(project_id, request.clip_id, request.timeline_frame, request.expected_revision, origin="rest", actor={"type": "human"}))
     except (StaleRevisionError, ValidationError, FileNotFoundError) as exc:
         raise _mutation_error(exc) from exc
 
@@ -183,7 +207,7 @@ def split(project_id: str, request: SplitMutation):
 @router.post("/projects/{project_id}/clips/delete")
 def delete(project_id: str, request: ClipMutation):
     try:
-        return project_to_dict(service.delete(project_id, request.clip_id, request.expected_revision))
+        return _rest_project(service.delete(project_id, request.clip_id, request.expected_revision, origin="rest", actor={"type": "human"}))
     except (StaleRevisionError, ValidationError, FileNotFoundError) as exc:
         raise _mutation_error(exc) from exc
 
@@ -191,7 +215,7 @@ def delete(project_id: str, request: ClipMutation):
 @router.post("/projects/{project_id}/clips/move")
 def move(project_id: str, request: MoveMutation):
     try:
-        return project_to_dict(service.move(project_id, request.clip_id, request.timeline_start_frame, request.expected_revision))
+        return _rest_project(service.move(project_id, request.clip_id, request.timeline_start_frame, request.expected_revision, origin="rest", actor={"type": "human"}))
     except (StaleRevisionError, ValidationError, FileNotFoundError) as exc:
         raise _mutation_error(exc) from exc
 
@@ -199,7 +223,7 @@ def move(project_id: str, request: MoveMutation):
 @router.post("/projects/{project_id}/clips/trim")
 def trim(project_id: str, request: TrimMutation):
     try:
-        return project_to_dict(service.trim(project_id, request.clip_id, request.expected_revision, request.source_in_frame, request.source_out_frame))
+        return _rest_project(service.trim(project_id, request.clip_id, request.expected_revision, request.source_in_frame, request.source_out_frame, origin="rest", actor={"type": "human"}))
     except (StaleRevisionError, ValidationError, FileNotFoundError) as exc:
         raise _mutation_error(exc) from exc
 

@@ -30,6 +30,7 @@ def _mutation(fn, *args):
     try:
         project = fn(*args)
         return {"ok": True, "project_id": project.id, "revision": project.revision,
+                "revision_id": project.revision_id, "timeline_id": project.timeline.id,
                 "timeline": application.projects.timeline(project.id)}
     except (Exception,) as exc:
         return _error(exc)
@@ -66,35 +67,36 @@ def remove_silence(project_id: str, expected_revision: int, minimum_silence_ms: 
                   noise_threshold_db: float = -35, keep_padding_ms: int = 0) -> dict[str, Any]:
     try:
         result = application.projects.remove_silence(project_id, expected_revision, minimum_silence_ms,
-                                                      noise_threshold_db, keep_padding_ms)
+                                                      noise_threshold_db, keep_padding_ms, origin="mcp", actor={"type": "agent"})
         return {key: value for key, value in result.items() if key != "project"}
     except Exception as exc: return _error(exc)
 
 
 @mcp.tool()
 def split_clip(project_id: str, clip_id: str, timeline_frame: int, expected_revision: int) -> dict[str, Any]:
-    return _mutation(application.projects.split, project_id, clip_id, timeline_frame, expected_revision)
+    return _mutation(lambda *args: application.projects.split(*args, origin="mcp", actor={"type": "agent"}), project_id, clip_id, timeline_frame, expected_revision)
 
 
 @mcp.tool()
 def delete_clip(project_id: str, clip_id: str, expected_revision: int) -> dict[str, Any]:
-    return _mutation(application.projects.delete, project_id, clip_id, expected_revision)
+    return _mutation(lambda *args: application.projects.delete(*args, origin="mcp", actor={"type": "agent"}), project_id, clip_id, expected_revision)
 
 
 @mcp.tool()
 def move_clip(project_id: str, clip_id: str, expected_revision: int, destination: dict[str, Any]) -> dict[str, Any]:
     try:
         kind = destination.get("kind")
-        if kind == "timeline_frame": result = application.projects.move(project_id, clip_id, int(destination["timeline_start_frame"]), expected_revision)
-        elif kind == "gap" and destination.get("alignment") == "start": result = application.projects.move_to_gap(project_id, clip_id, int(destination["gap_ordinal"]), expected_revision)
+        if kind == "timeline_frame": result = application.projects.move(project_id, clip_id, int(destination["timeline_start_frame"]), expected_revision, origin="mcp", actor={"type": "agent"})
+        elif kind == "gap" and destination.get("alignment") == "start": result = application.projects.move_to_gap(project_id, clip_id, int(destination["gap_ordinal"]), expected_revision, origin="mcp", actor={"type": "agent"})
         else: raise ValidationError("destination must be a timeline_frame or start-aligned gap")
-        return {"ok": True, "project_id": result.id, "revision": result.revision, "timeline": application.projects.timeline(result.id)}
+        return {"ok": True, "project_id": result.id, "revision": result.revision, "revision_id": result.revision_id,
+                "timeline_id": result.timeline.id, "timeline": application.projects.timeline(result.id)}
     except Exception as exc: return _error(exc)
 
 
 @mcp.tool()
 def trim_clip(project_id: str, clip_id: str, expected_revision: int, edge: str, frames_to_remove: int) -> dict[str, Any]:
-    return _mutation(application.projects.trim_relative, project_id, clip_id, expected_revision, edge, frames_to_remove)
+    return _mutation(lambda *args: application.projects.trim_relative(*args, origin="mcp", actor={"type": "agent"}), project_id, clip_id, expected_revision, edge, frames_to_remove)
 
 
 def _render(fn, project_id: str, expected_revision: int) -> dict[str, Any]:

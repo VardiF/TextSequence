@@ -30,7 +30,7 @@ Suggested recording assets:
 
 ## Features
 
-Implemented in v0.1.2:
+Implemented in v0.2.0:
 
 - local MP4 import and media streaming;
 - canonical integer-frame V1 timeline with stable IDs;
@@ -38,6 +38,8 @@ Implemented in v0.1.2:
 - Render Preview and MP4 export through local FFmpeg;
 - real Streamable HTTP MCP server with 11 tools;
 - revision-safe human and external-agent co-editing;
+- schema-v2 canonical projects with explicit Timeline identity;
+- immutable full-snapshot revision history with safe v1 promotion; and
 - deterministic local silence analysis and removal;
 - optional built-in OpenAI assistant; and
 - no `OPENAI_API_KEY` requirement for core editing, rendering, or MCP use.
@@ -92,11 +94,30 @@ make frontend
 
 Open `http://127.0.0.1:5173`. The backend API is at
 `http://127.0.0.1:8000`. Projects and runtime renders remain local and are
-ignored by Git. Imported media is external and is never modified.
+ignored by Git. Imported media is external and is never modified. Browser-
+selected uploads are copied into the ignored local `media/{project_id}`
+directory before probing and import. The original filename is retained as
+asset display metadata, while the stored filename is sanitized and unique.
+Path-based import remains available as an advanced option for deliberate
+external references.
 
 The deliberate Node choice is Node 18 + Vite 6: this pinned configuration is
 stable and the production build passes; upgrading Node is not needed for this
-release.
+release. The backend remains compatible with the existing Node 18 frontend
+toolchain; no Node upgrade is required for v0.2.0.
+
+## Canonical project and revisions
+
+Persisted v2 JSON has one top-level `timeline` object; timeline tracks are
+never persisted as a competing top-level collection. Project, timeline, asset,
+track, and clip IDs are opaque and stable. Positions and revisions are integer
+frames/numbers; rational frame rates retain their numerator and denominator.
+
+Each new project is stored as a directory with `head.json` and immutable full
+snapshots under `revisions/{revision_id}.json`. A loaded v1 flat file is
+migrated in memory. The first successful mutation writes a deterministic
+migration baseline plus `legacy-v1.json`, then commits the mutation; failed
+mutations do not promote the file. The original flat file remains recoverable.
 
 ## MCP quickstart
 

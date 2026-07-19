@@ -35,17 +35,17 @@ def test_editor_context_is_validated_against_authoritative_project(tmp_path):
     clip_id = project.tracks[0].clips[0].id
     contexts = EditorContextStore(service)
     context = contexts.capture({"editor_session_id": "editor_test", "project_id": project.id,
-                                "observed_revision": 1, "selected_clip_id": clip_id,
+                                "observed_revision": 0, "selected_clip_id": clip_id,
                                 "playhead_frame": 12, "visible_track_id": project.tracks[0].id})
     result = contexts.get(context.editor_session_id)
     assert result["selected_clip_exists"] is True
-    assert result["current_project_revision"] == 1
+    assert result["current_project_revision"] == 0
     with pytest.raises(EditorContextError) as missing:
         contexts.get("editor_unknown")
     assert missing.value.code == "EDITOR_CONTEXT_MISSING"
     with pytest.raises(EditorContextError) as invalid:
         contexts.capture({"editor_session_id": "editor_bad", "project_id": project.id,
-                          "observed_revision": 1, "selected_clip_id": "clip_missing", "playhead_frame": 1})
+                          "observed_revision": 0, "selected_clip_id": "clip_missing", "playhead_frame": 1})
     assert invalid.value.code == "INVALID_SELECTION"
 
 
@@ -87,9 +87,9 @@ def test_project_ids_are_path_safe(tmp_path):
 
 def test_timeline_projection_has_stable_order_and_gaps(tmp_path):
     service, project = seeded_service(tmp_path)
-    project = service.move(project.id, project.tracks[0].clips[0].id, 10, 1)
+    project = service.move(project.id, project.tracks[0].clips[0].id, 10, 0)
     first = project.tracks[0].clips[0]
-    project = service.split(project.id, first.id, 40, 2)
+    project = service.split(project.id, first.id, 40, 1)
     projection = service.timeline(project.id)
     track = projection["tracks"][0]
     assert [clip["ordinal"] for clip in track["clips"]] == [1, 2]
@@ -103,10 +103,10 @@ def test_same_expected_revision_concurrent_mutations_have_one_winner(tmp_path):
     clip_id = project.tracks[0].clips[0].id
     def mutate(frame):
         try:
-            return service.split(project.id, clip_id, frame, 1)
+            return service.split(project.id, clip_id, frame, 0)
         except StaleRevisionError as exc:
             return exc
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(mutate, (30, 60)))
     assert sum(isinstance(result, StaleRevisionError) for result in results) == 1
-    assert service.get(project.id).revision == 2
+    assert service.get(project.id).revision == 1

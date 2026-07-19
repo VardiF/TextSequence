@@ -43,12 +43,12 @@ def test_analysis_thresholds_and_padding(silence_media_path, tmp_path):
     assert analysis["silences"][0]["end_frame"] == 48
     shorter_threshold = service.analyze_silence(project.id, 400)
     assert shorter_threshold["summary"]["detected_silences"] == 2
-    result = service.remove_silence(project.id, 1, keep_padding_ms=100)
-    assert result["revision"] == 2
-    assert result["previous_revision"] == 1
+    result = service.remove_silence(project.id, 0, keep_padding_ms=100)
+    assert result["revision"] == 1
+    assert result["previous_revision"] == 0
     assert result["removed_frames"] == 20
     assert result["removed_duration_ms"] == 833
-    assert service.get(project.id).revision == 2
+    assert service.get(project.id).revision == 1
 
 
 def test_timeline_mapping_intersects_trimmed_and_moved_clips(tmp_path):
@@ -72,7 +72,7 @@ def test_timeline_mapping_intersects_trimmed_and_moved_clips(tmp_path):
 
 def test_remove_silence_renders_shorter_h264_aac_media(silence_media_path, tmp_path):
     service, project = make_service(tmp_path, silence_media_path)
-    result = service.remove_silence(project.id, 1)
+    result = service.remove_silence(project.id, 0)
     rendered = service.render_preview(project.id, result["revision"])
     ffprobe = find_ffprobe()
     assert ffprobe
@@ -89,12 +89,13 @@ def test_remove_silence_rejects_revision_changed_during_analysis(silence_media_p
     def analyze_then_external_edit(current, minimum_ms, threshold_db):
         analyses = original(current, minimum_ms, threshold_db)
         changed = deepcopy(service.get(project.id))
-        changed.revision = 2
+        changed.revision = 1
+        changed.revision_id = service.store.revision_id_factory()
         service.store.save(changed)
         return analyses
 
     monkeypatch.setattr(service, "_analyze_project_silence", analyze_then_external_edit)
     with pytest.raises(StaleRevisionError) as error:
-        service.remove_silence(project.id, 1)
-    assert error.value.current_revision == 2
-    assert service.get(project.id).revision == 2
+        service.remove_silence(project.id, 0)
+    assert error.value.current_revision == 1
+    assert service.get(project.id).revision == 1

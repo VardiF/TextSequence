@@ -1,0 +1,28 @@
+{
+  "id": "project_v1_imported",
+  "name": "V1 imported",
+  "fps": {"numerator": 24, "denominator": 1},
+  "revision": 4,
+  "assets": [{
+    "id": "asset_v1",
+    "path": "/tmp/known.mp4",
+    "name": "known.mp4",
+    "codec": "h264",
+    "width": 320,
+    "height": 180,
+    "fps": {"numerator": 24, "denominator": 1},
+    "duration_frames": 48
+  }],
+  "tracks": [{
+    "id": "track_v1",
+    "name": "V1",
+    "kind": "video",
+    "clips": [{
+      "id": "clip_v1",
+      "asset_id": "asset_v1",
+      "source_in_frame": 0,
+      "source_out_frame": 48,
+      "timeline_start_frame": 0
+    }]
+  }]
+}

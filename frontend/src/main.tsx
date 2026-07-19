@@ -1,17 +1,20 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import './styles.css';
+import { mapTimelineFrameToPlayback, TimelinePlaybackSample } from './playback';
 
 type FrameRate = { numerator: number; denominator: number };
 type Asset = { id: string; path: string; name: string; codec: string; width: number; height: number; fps: FrameRate; duration_frames: number };
 type Clip = { id: string; asset_id: string; source_in_frame: number; source_out_frame: number; timeline_start_frame: number };
 type Track = { id: string; name: string; clips: Clip[] };
-type Project = { id: string; name: string; revision: number; fps: FrameRate | null; assets: Asset[]; tracks: Track[] };
+type Timeline = { id: string; name: string; external_refs: unknown[]; tracks: Track[]; markers: unknown[] };
+type Project = { schema_version: number; id: string; name: string; revision: number; revision_id: string; external_refs: unknown[]; fps: FrameRate | null; assets: Asset[]; timeline: Timeline };
 type TrimEdge = 'in' | 'out';
 type TrimPreview = { clipId: string; sourceInFrame: number; sourceOutFrame: number };
 type MovePreview = { clipId: string; timelineStartFrame: number };
 type RenderState = 'idle' | 'rendering' | 'success' | 'failure';
 type RenderedMedia = { url: string; revision: number };
+type PreviewMode = 'live' | 'rendered';
 type ChatAction = { tool: string; summary: string; arguments?: Record<string, unknown> };
 type ChatMessage = { role: 'user' | 'assistant'; text: string; actions?: ChatAction[] };
 type Health = { mcp: { status: string; endpoint: string; transport: string; tool_count: number }; built_in_assistant: { configured: boolean } };
@@ -29,9 +32,13 @@ const clipDuration = (clip: Clip) => clip.source_out_frame - clip.source_in_fram
 function App() {
   const [project, setProject] = useState<Project | null>(null);
   const [path, setPath] = useState('');
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [uploadBusy, setUploadBusy] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
   const [error, setError] = useState('');
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   const [frame, setFrame] = useState(0);
+  const [playing, setPlaying] = useState(false);
   const [trimPreview, setTrimPreview] = useState<TrimPreview | null>(null);
   const trimGesture = useRef<{ clipId: string; edge: TrimEdge; startX: number; initialIn: number; initialOut: number; width: number } | null>(null);
   const trimPreviewRef = useRef<TrimPreview | null>(null);
@@ -41,6 +48,7 @@ function App() {
   const deferredExternalProject = useRef<Project | null>(null);
   const [renderState, setRenderState] = useState<RenderState>('idle');
   const [renderedPreview, setRenderedPreview] = useState<RenderedMedia | null>(null);
+  const [previewMode, setPreviewMode] = useState<PreviewMode>('live');
   const [exportedMedia, setExportedMedia] = useState<RenderedMedia | null>(null);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [chatInput, setChatInput] = useState('');
@@ -60,23 +68,28 @@ function App() {
   const [silenceRemoval, setSilenceRemoval] = useState<SilenceRemoval | null>(null);
   const [silenceBusy, setSilenceBusy] = useState(false);
   const video = useRef<HTMLVideoElement>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
+  const playingRef = useRef(false);
+  const playbackClock = useRef<{ startTime: number; startFrame: number; raf: number } | null>(null);
+  const videoSync = useRef<{ clipId: string | null; assetId: string | null }>({ clipId: null, assetId: null });
   const asset = project?.assets[0];
-  const clips = project?.tracks[0]?.clips ?? [];
+  const clips = project?.timeline.tracks[0]?.clips ?? [];
   const selectedClip = clips.find((clip) => clip.id === selectedClipId) ?? null;
   const fps = fpsValue(project);
-  const timelineDuration = Math.max(1, asset?.duration_frames ?? 1, ...clips.map((clip) => clip.timeline_start_frame + clipDuration(clip)));
+  const timelineDuration = Math.max(1, ...clips.map((clip) => clip.timeline_start_frame + clipDuration(clip)));
+  const playbackSample: TimelinePlaybackSample = project?.fps
+    ? mapTimelineFrameToPlayback(clips, frame, project.fps)
+    : { kind: 'gap', timeline_frame: frame };
+  const playheadInsideSelected = Boolean(selectedClip && frame > selectedClip.timeline_start_frame && frame < selectedClip.timeline_start_frame + clipDuration(selectedClip));
+  const editHint = !selectedClip
+    ? 'Select a clip to edit.'
+    : !playheadInsideSelected
+      ? 'Move the playhead inside the selected clip.'
+      : 'Ready for an edit at the playhead.';
 
   useEffect(() => {
     void api<Health>('/health').then(setHealth).catch(() => setHealth(null));
   }, []);
-
-  useEffect(() => {
-    const element = video.current;
-    if (!element || !fps) return undefined;
-    const tick = () => setFrame(Math.max(0, Math.round(element.currentTime * fps)));
-    element.addEventListener('timeupdate', tick);
-    return () => element.removeEventListener('timeupdate', tick);
-  }, [fps, project]);
 
   useEffect(() => {
     if (!project) return undefined;
@@ -100,23 +113,132 @@ function App() {
     return () => { cancelled = true; window.clearInterval(timer); };
   }, [project?.id, project?.revision]);
 
+  useEffect(() => {
+    const preventNavigation = (event: DragEvent) => event.preventDefault();
+    window.addEventListener('dragover', preventNavigation);
+    window.addEventListener('drop', preventNavigation);
+    return () => {
+      window.removeEventListener('dragover', preventNavigation);
+      window.removeEventListener('drop', preventNavigation);
+    };
+  }, []);
+
   const refresh = (next: Project, selection: string | null = selectedClipId) => {
+    stopTimelinePlayback();
     setProject(next);
-    setSelectedClipId(selection && next.tracks[0]?.clips.some((clip) => clip.id === selection) ? selection : null);
+    setSelectedClipId(selection && next.timeline.tracks[0]?.clips.some((clip) => clip.id === selection) ? selection : null);
     setRenderedPreview(null);
+    setPreviewMode('live');
     setExportedMedia(null);
     setRenderState('idle');
     setSilenceRemoval(null);
     setError('');
   };
+  const sampleAt = (timelineFrame: number): TimelinePlaybackSample => project?.fps
+    ? mapTimelineFrameToPlayback(clips, timelineFrame, project.fps)
+    : { kind: 'gap', timeline_frame: timelineFrame };
+  const syncVideoToTimeline = (timelineFrame: number, force = false) => {
+    const element = video.current;
+    const currentRenderedPreview = renderedPreview?.revision === project?.revision ? renderedPreview : null;
+    if (element && previewMode === 'rendered' && currentRenderedPreview) {
+      element.controls = false;
+      element.style.visibility = 'visible';
+      const renderedTime = project?.fps ? timelineFrame * project.fps.denominator / project.fps.numerator : 0;
+      const sourceChanged = element.getAttribute('src') !== currentRenderedPreview.url;
+      if (sourceChanged) {
+        element.src = currentRenderedPreview.url;
+        element.load();
+        element.onloadedmetadata = () => {
+          if (video.current === element) {
+            element.currentTime = renderedTime;
+            if (playingRef.current) void element.play().catch(() => undefined);
+          }
+        };
+      }
+      if (force || sourceChanged || Math.abs(element.currentTime - renderedTime) > 0.12) element.currentTime = renderedTime;
+      if (playingRef.current && element.paused) void element.play().catch(() => undefined);
+      return;
+    }
+    const sample = sampleAt(timelineFrame);
+    if (!element || sample.kind === 'gap') {
+      element?.pause();
+      if (element) { element.controls = false; element.style.visibility = 'hidden'; }
+      return;
+    }
+    element.controls = false;
+    element.style.visibility = 'visible';
+    const sourceUrl = `/api/projects/${project?.id}/assets/${sample.clip.asset_id}/media`;
+    const sourceChanged = element.getAttribute('src') !== sourceUrl;
+    if (sourceChanged) {
+      element.src = sourceUrl;
+      element.load();
+      element.onloadedmetadata = () => {
+        if (video.current === element) {
+          element.currentTime = sample.source_time_seconds;
+          if (playingRef.current) void element.play().catch(() => undefined);
+        }
+      };
+    }
+    const assetChanged = videoSync.current.assetId !== sample.clip.asset_id;
+    const clipChanged = videoSync.current.clipId !== sample.clip.id;
+    videoSync.current = { clipId: sample.clip.id, assetId: sample.clip.asset_id };
+    if (force || sourceChanged || assetChanged || clipChanged || Math.abs(element.currentTime - sample.source_time_seconds) > 0.12) {
+      element.currentTime = sample.source_time_seconds;
+    }
+    if (playingRef.current && element.paused) void element.play().catch(() => undefined);
+  };
+  const stopTimelinePlayback = () => {
+    if (playbackClock.current) cancelAnimationFrame(playbackClock.current.raf);
+    playbackClock.current = null;
+    playingRef.current = false;
+    setPlaying(false);
+    video.current?.pause();
+  };
+  const tickTimelinePlayback = (now: number) => {
+    const clock = playbackClock.current;
+    if (!clock || !fps) return;
+    const elapsedFrames = Math.floor((now - clock.startTime) * fps / 1000);
+    const nextFrame = Math.min(timelineDuration, clock.startFrame + elapsedFrames);
+    syncVideoToTimeline(nextFrame);
+    setFrame(nextFrame);
+    if (nextFrame >= timelineDuration) {
+      playbackClock.current = null;
+      playingRef.current = false;
+      setPlaying(false);
+      video.current?.pause();
+      return;
+    }
+    clock.raf = requestAnimationFrame(tickTimelinePlayback);
+  };
+  const playTimeline = () => {
+    if (!project || !fps || !clips.length) return;
+    const startFrame = frame >= timelineDuration ? 0 : frame;
+    playingRef.current = true;
+    setPlaying(true);
+    playbackClock.current = { startTime: performance.now(), startFrame, raf: 0 };
+    syncVideoToTimeline(startFrame, true);
+    setFrame(startFrame);
+    playbackClock.current.raf = requestAnimationFrame(tickTimelinePlayback);
+  };
+  const toggleTimelinePlayback = () => {
+    if (playingRef.current) stopTimelinePlayback();
+    else playTimeline();
+  };
   const seek = (nextFrame: number) => {
     const target = Math.max(0, Math.min(timelineDuration, Math.round(nextFrame)));
-    if (video.current && fps) video.current.currentTime = target / fps;
+    if (playingRef.current && playbackClock.current) {
+      playbackClock.current.startTime = performance.now();
+      playbackClock.current.startFrame = target;
+    }
+    syncVideoToTimeline(target, true);
     setFrame(target);
   };
   const create = async () => {
-    try { refresh(await api<Project>('/projects', { method: 'POST', body: JSON.stringify({ name: 'Untitled project' }) }), null); }
-    catch (exception) { setError(String(exception)); }
+    try {
+      const next = await api<Project>('/projects', { method: 'POST', body: JSON.stringify({ name: 'Untitled project' }) });
+      refresh(next, null);
+      return next;
+    } catch (exception) { setError(String(exception)); return null; }
   };
   const open = async () => {
     try { const projects = await api<Project[]>('/projects'); if (projects[0]) refresh(await api<Project>(`/projects/${projects[0].id}`), null); else await create(); }
@@ -127,16 +249,57 @@ function App() {
     try { refresh(await api<Project>(`/projects/${project.id}/assets`, { method: 'POST', body: JSON.stringify({ path }) }), null); }
     catch (exception) { setError(String(exception)); }
   };
+  const chooseFile = () => fileInput.current?.click();
+  const uploadFile = async (file: File | undefined, multiple = false) => {
+    if (!file || uploadBusy) return;
+    if (multiple) { setError('Please choose one video at a time.'); return; }
+    if (!file.type.startsWith('video/') && !/\.(mp4|mov|m4v|webm|mkv)$/i.test(file.name)) {
+      setError('Please choose a supported video file.');
+      return;
+    }
+    setSelectedFile(file);
+    setUploadBusy(true);
+    setError('');
+    try {
+      const target = project ?? await create();
+      if (!target) return;
+      const form = new FormData();
+      form.append('file', file, file.name);
+      form.append('expected_revision', String(target.revision));
+      const response = await fetch(`/api/projects/${target.id}/assets/upload`, { method: 'POST', body: form });
+      if (!response.ok) throw new Error(await response.text());
+      refresh(await response.json() as Project, null);
+    } catch (exception) { setError(String(exception)); }
+    finally { setUploadBusy(false); }
+  };
+  const handleDrop = (event: React.DragEvent<HTMLElement>) => {
+    event.preventDefault();
+    setDragOver(false);
+    void uploadFile(event.dataTransfer.files[0], event.dataTransfer.files.length > 1);
+  };
   const mutate = async (route: string, body: Record<string, unknown>, selection: string | null = selectedClipId) => {
     if (!project) return;
     try { refresh(await api<Project>(`/projects/${project.id}/clips/${route}`, { method: 'POST', body: JSON.stringify({ ...body, expected_revision: project.revision }) }), selection); }
     catch (exception) { setError(String(exception)); }
   };
   const split = () => {
-    if (selectedClip && frame > selectedClip.timeline_start_frame && frame < selectedClip.timeline_start_frame + clipDuration(selectedClip)) void mutate('split', { clip_id: selectedClip.id, timeline_frame: frame });
-    else setError('Place the playhead inside the selected clip to split it.');
+    if (!selectedClip) { setError('Select a clip to edit.'); return; }
+    if (!playheadInsideSelected) { setError('Move the playhead inside the selected clip.'); return; }
+    void mutate('split', { clip_id: selectedClip.id, timeline_frame: frame });
   };
-  const remove = () => { if (selectedClip) void mutate('delete', { clip_id: selectedClip.id }, null); else setError('Select a clip to delete.'); };
+  const trimStartToPlayhead = () => {
+    if (!selectedClip) { setError('Select a clip to edit.'); return; }
+    if (!playheadInsideSelected) { setError('Move the playhead inside the selected clip.'); return; }
+    const framesIntoClip = frame - selectedClip.timeline_start_frame;
+    void mutate('trim', { clip_id: selectedClip.id, source_in_frame: selectedClip.source_in_frame + framesIntoClip }, selectedClip.id);
+  };
+  const trimEndToPlayhead = () => {
+    if (!selectedClip) { setError('Select a clip to edit.'); return; }
+    if (!playheadInsideSelected) { setError('Move the playhead inside the selected clip.'); return; }
+    const framesIntoClip = frame - selectedClip.timeline_start_frame;
+    void mutate('trim', { clip_id: selectedClip.id, source_out_frame: selectedClip.source_in_frame + framesIntoClip }, selectedClip.id);
+  };
+  const remove = () => { if (selectedClip) void mutate('delete', { clip_id: selectedClip.id }, null); else setError('Select a clip to edit.'); };
   const renderProject = async (kind: 'preview' | 'export') => {
     if (!project || renderState === 'rendering') return;
     setRenderState('rendering');
@@ -144,7 +307,12 @@ function App() {
     try {
       const result = await api<{ url: string; revision: number }>(`/projects/${project.id}/${kind === 'preview' ? 'render-preview' : 'export'}`, { method: 'POST', body: JSON.stringify({ expected_revision: project.revision }) });
       const media = { url: `${result.url}?revision=${result.revision}`, revision: result.revision };
-      if (kind === 'preview') setRenderedPreview(media);
+      if (kind === 'preview') {
+        stopTimelinePlayback();
+        setFrame(0);
+        setRenderedPreview(media);
+        setPreviewMode('rendered');
+      }
       else setExportedMedia(media);
       setRenderState('success');
     } catch (exception) {
@@ -164,7 +332,7 @@ function App() {
         method: 'POST',
         body: JSON.stringify({ editor_session_id: editorSessionId, message, editor_context: {
           editor_session_id: editorSessionId, project_id: project.id, observed_revision: project.revision,
-          selected_clip_id: selectedClipId, playhead_frame: frame, visible_track_id: project.tracks[0]?.id ?? null,
+          selected_clip_id: selectedClipId, playhead_frame: frame, visible_track_id: project.timeline.tracks[0]?.id ?? null,
         } }),
       });
       setChatMessages((current) => [...current, { role: 'assistant', text: response.message, actions: response.actions ?? [] }]);
@@ -261,15 +429,19 @@ function App() {
     const destination = Math.max(0, Math.round(((event.clientX - bounds.left) / bounds.width) * timelineDuration));
     if (clipId) void mutate('move', { clip_id: clipId, timeline_start_frame: destination }, clipId);
   };
+  useEffect(() => {
+    if (!playingRef.current) syncVideoToTimeline(frame, true);
+  }, [project?.id, project?.revision, frame, previewMode, renderedPreview?.url]);
 
   return <main>
-    <header><h1>TextSequence</h1><span>v0.1.2 · MCP-native NLE</span></header>
-    <section className="toolbar"><button onClick={create}>New project</button><button onClick={open}>Open latest</button><input value={path} onChange={(event) => setPath(event.target.value)} placeholder="Absolute path to a video" /><button onClick={importAsset} disabled={!project || !path}>Import video</button><button onClick={split} disabled={!selectedClip}>Split</button><button onClick={remove} disabled={!selectedClip}>Delete</button><button onClick={() => void renderProject('preview')} disabled={!project || renderState === 'rendering'}>{renderState === 'rendering' ? 'Rendering…' : 'Render Preview'}</button><button onClick={() => void renderProject('export')} disabled={!project || renderState === 'rendering'}>Export MP4</button></section>
+    <header><h1>TextSequence</h1><span>v0.2.0 · MCP-native NLE</span></header>
+    <section className="toolbar"><button onClick={create}>New project</button><button onClick={open}>Open latest</button><div className={`import-controls ${dragOver ? 'drag-over' : ''}`} onDragEnter={(event) => { event.preventDefault(); setDragOver(true); }} onDragOver={(event) => event.preventDefault()} onDragLeave={() => setDragOver(false)} onDrop={handleDrop}><button onClick={chooseFile} disabled={uploadBusy}>{uploadBusy ? 'Importing…' : 'Choose Video'}</button><input ref={fileInput} type="file" accept="video/*,.mp4,.mov,.m4v" hidden onChange={(event) => { void uploadFile(event.target.files?.[0]); event.currentTarget.value = ''; }} /><span>{selectedFile?.name ?? 'Drop a video here'}</span></div><button onClick={() => void renderProject('preview')} disabled={!project || renderState === 'rendering'}>{renderState === 'rendering' ? 'Rendering…' : 'Render Preview'}</button><button onClick={() => void renderProject('export')} disabled={!project || renderState === 'rendering'}>Export MP4</button></section>
     <section className="connections"><h2>Agent connections</h2><div className="connection-row"><div><strong>TextSequence MCP</strong><span className="status ready">● {health?.mcp.status === 'running' ? 'Running' : 'Checking'}</span><p>{health?.mcp.transport ?? 'Streamable HTTP'}</p><p><strong>Available tools: {health?.mcp.tool_count ?? 11}</strong></p><code>{health?.mcp.endpoint ?? 'http://127.0.0.1:8000/mcp'}</code></div><button onClick={() => void navigator.clipboard?.writeText(health?.mcp.endpoint ?? 'http://127.0.0.1:8000/mcp')}>Copy MCP URL</button></div><div className="connection-row"><div><strong>Built-in assistant</strong><span className={`status ${health?.built_in_assistant.configured ? 'ready' : 'optional'}`}>● {health?.built_in_assistant.configured ? 'Ready' : 'Optional · Not configured'}</span><p>{health?.built_in_assistant.configured ? 'OpenAI Agents SDK' : 'Optional for core editing. Connect an external MCP agent or configure OPENAI_API_KEY.'}</p></div></div></section>
     {error && <p className="error">{error}</p>}
-    {!project && <section className="empty-state"><div className="empty-icon">TS</div><h2>Start an MCP-native edit</h2><p>Create a project or open the latest one, then import a local CFR H.264/AAC video.</p><ol><li>Create or open a project</li><li>Import a video</li><li>Edit manually or connect an MCP agent</li><li>Render a preview</li><li>Export MP4</li></ol><div className="empty-actions"><button onClick={create}>Create project</button><button onClick={open}>Open latest</button></div></section>}
+    {project && <><div className="preview-mode" aria-label="Preview mode"><strong>PREVIEW</strong><button className={previewMode === 'live' ? 'active' : ''} onClick={() => setPreviewMode('live')}>Live</button><button className={previewMode === 'rendered' ? 'active' : ''} onClick={() => setPreviewMode('rendered')} disabled={!renderedPreview || renderedPreview.revision !== project.revision}>Rendered</button><span>{previewMode === 'rendered' ? 'Rendered MP4 · linear timeline playback' : 'Source media · clip mapping playback'}</span></div><section className="editing-toolbar" aria-label="Editing actions"><div className="editing-heading"><strong>EDIT</strong><span>{selectedClip ? `Selected clip · ${selectedClip.id.slice(0, 12)}` : 'No clip selected'} · Playhead frame {frame}</span></div><div className="editing-actions"><button onClick={toggleTimelinePlayback} disabled={!clips.length}>{playing ? 'Pause' : 'Play'}</button><button onClick={split} disabled={!selectedClip || !playheadInsideSelected} title={editHint}>Split at Playhead</button><button onClick={trimStartToPlayhead} disabled={!selectedClip || !playheadInsideSelected} title={editHint}>Trim Start to Playhead</button><button onClick={trimEndToPlayhead} disabled={!selectedClip || !playheadInsideSelected} title={editHint}>Trim End to Playhead</button><button onClick={remove} disabled={!selectedClip} title={selectedClip ? 'Delete the selected clip' : 'Select a clip to edit.'}>Delete Selected</button></div><small className="editing-hint">{editHint}{fps ? ` · ${(frame / fps).toFixed(2)}s` : ''}</small></section></>}
+    {!project && <section className={`empty-state ${dragOver ? 'drag-over' : ''}`} onDragEnter={(event) => { event.preventDefault(); setDragOver(true); }} onDragOver={(event) => event.preventDefault()} onDragLeave={() => setDragOver(false)} onDrop={handleDrop}><div className="empty-icon">TS</div><h2>Drop a video here to get started</h2><p>Choose a local video or drop one from Finder. Imported files stay on this machine.</p><div className="empty-actions"><button onClick={chooseFile} disabled={uploadBusy}>{uploadBusy ? 'Importing…' : 'Choose Video'}</button><button onClick={open}>Open latest</button></div></section>}
     {project && <section className="auto-edit"><div className="section-heading"><div><h3>Auto Edit · Silence Removal</h3><p>Analyze locally with FFmpeg, then apply one revision-checked batch edit.</p></div><span className="tool-badge">Deterministic</span></div><div className="auto-edit-controls"><label>Minimum silence <input type="number" min="1" value={silenceMinimumMs} onChange={(event) => setSilenceMinimumMs(Number(event.target.value))} /> ms</label><label>Keep padding <input type="number" min="0" value={silencePaddingMs} onChange={(event) => setSilencePaddingMs(Number(event.target.value))} /> ms</label><button onClick={() => void analyzeSilence()} disabled={silenceBusy}>{silenceBusy ? 'Analyzing…' : 'Analyze Silence'}</button><button onClick={() => void removeSilence()} disabled={silenceBusy || !silenceAnalysis || silenceAnalysis.summary.detected_silences === 0}>{silenceBusy ? 'Working…' : 'Remove Silence'}</button></div>{silenceAnalysis && <div className="auto-edit-result"><strong>Analysis</strong><span>{silenceAnalysis.summary.detected_silences} detected range(s) · {silenceAnalysis.summary.total_silence_frames} frames · minimum {silenceAnalysis.minimum_silence_ms} ms · threshold {silenceAnalysis.noise_threshold_db} dB</span></div>}{silenceRemoval && <div className="auto-edit-result success"><strong>Removal complete</strong><span>{silenceRemoval.removed_silences} range(s) removed · {silenceRemoval.removed_duration_ms} ms ({silenceRemoval.removed_frames} frames) · revision {silenceRemoval.revision}</span></div>}</section>}
-    {project && <><h2>{project.name}</h2><section className="workspace"><div className="preview"><div className="preview-label">{renderedPreview?.revision === project.revision ? 'RENDERED TIMELINE PREVIEW' : 'SOURCE PREVIEW'}</div>{asset ? <video ref={video} src={renderedPreview?.revision === project.revision ? renderedPreview.url : `/api/projects/${project.id}/assets/${asset.id}/media`} controls /> : <p>Import a local video to begin.</p>}{exportedMedia && <a className="export-link" href={exportedMedia.url} target="_blank" rel="noreferrer">Open exported MP4</a>}</div><aside><h3>Project JSON</h3><pre>{JSON.stringify(project, null, 2)}</pre></aside></section><section className="timeline"><div className="track-label">V1</div><div className="track" onClick={(event) => { const bounds = event.currentTarget.getBoundingClientRect(); seek(((event.clientX - bounds.left) / bounds.width) * timelineDuration); }} onDragOver={(event) => event.preventDefault()} onDrop={dropClip}>{clips.map((clip) => { const trim = trimPreview?.clipId === clip.id ? trimPreview : null; const move = movePreview?.clipId === clip.id ? movePreview : null; const sourceIn = trim ? trim.sourceInFrame : clip.source_in_frame; const sourceOut = trim ? trim.sourceOutFrame : clip.source_out_frame; const start = move ? move.timelineStartFrame : clip.timeline_start_frame; return <div key={clip.id} className={`clip ${clip.id === selectedClipId ? 'selected' : ''}`} draggable={false} onMouseDown={(event) => beginMove(event, clip)} onClick={(event) => { event.stopPropagation(); const bounds = (event.currentTarget.parentElement as HTMLElement).getBoundingClientRect(); seek(((event.clientX - bounds.left) / bounds.width) * timelineDuration); setSelectedClipId(clip.id); setError(''); }} onDragStart={(event) => { setSelectedClipId(clip.id); event.dataTransfer.setData('text/clip-id', clip.id); }} style={{ left: `${start / timelineDuration * 100}%`, width: `${(sourceOut - sourceIn) / timelineDuration * 100}%` }}><span className="trim-handle trim-handle-in" onMouseDown={(event) => beginTrim(event, clip, 'in')} /><span className="clip-label">{asset?.name}</span><span className="trim-handle trim-handle-out" onMouseDown={(event) => beginTrim(event, clip, 'out')} /></div>; })}<div className="playhead" style={{ left: `${frame / timelineDuration * 100}%` }} /></div><div className="timeline-meta">Frame {frame} / {timelineDuration} · {project.fps ? `${project.fps.numerator}/${project.fps.denominator} fps` : 'No media'}{selectedClip ? ` · Selected ${selectedClip.id}` : ''}</div></section><section className="agent-panel"><div className="agent-heading"><h3>Built-in assistant</h3><span>{chatSending ? 'Processing…' : health?.built_in_assistant.configured ? 'Optional OpenAI integration' : 'Not configured'}</span></div>{!health?.built_in_assistant.configured ? <p className="agent-empty">Built-in assistant not configured. Connect an external MCP agent to TextSequence, or set OPENAI_API_KEY to enable this optional assistant.</p> : <><div className="agent-messages">{chatMessages.length === 0 && <p className="agent-empty">Ask the assistant to inspect or edit the current timeline.</p>}{chatMessages.map((item, index) => <article key={`${item.role}-${index}`} className={`agent-message ${item.role}`}><strong>{item.role === 'user' ? 'You' : 'Assistant'}</strong><p>{item.text}</p>{item.actions?.map((action, actionIndex) => <div className="agent-action" key={`${action.tool}-${actionIndex}`}>✓ {action.summary}</div>)}</article>)}</div><div className="agent-input"><input value={chatInput} disabled={chatSending} placeholder="Ask: Split this here" onChange={(event) => setChatInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void sendChat(); }} /><button onClick={() => void sendChat()} disabled={chatSending || !chatInput.trim()}>Send</button></div></>}</section></>}
+    {project && <><h2>{project.name}</h2><details className="advanced-import"><summary>Advanced: import by local path</summary><div><input value={path} onChange={(event) => setPath(event.target.value)} placeholder="/path/to/video.mp4" /><button onClick={importAsset} disabled={!path || uploadBusy}>Import Path</button><p>Path imports reference an external local file without copying it.</p></div></details>{!asset && <section className={`media-import-area ${dragOver ? 'drag-over' : ''}`} onDragEnter={(event) => { event.preventDefault(); setDragOver(true); }} onDragOver={(event) => event.preventDefault()} onDragLeave={() => setDragOver(false)} onDrop={handleDrop}><strong>Drop a video here</strong><span>or use Choose Video above · Imported files stay on this machine.</span></section>}<section className="workspace"><div className="preview"><div className="preview-label">{previewMode === 'rendered' && renderedPreview?.revision === project.revision ? 'RENDERED TIMELINE PREVIEW' : 'SOURCE PREVIEW'}</div>{asset ? <video ref={video} src={previewMode === 'rendered' && renderedPreview?.revision === project.revision ? renderedPreview.url : `/api/projects/${project.id}/assets/${asset.id}/media`} /> : <p>Import a local video to begin.</p>}{exportedMedia && <a className="export-link" href={exportedMedia.url} target="_blank" rel="noreferrer">Open exported MP4</a>}</div><aside><h3>Project JSON</h3><pre>{JSON.stringify(project, null, 2)}</pre></aside></section><section className="timeline"><div className="track-label">V1</div><div className="track" onClick={(event) => { const bounds = event.currentTarget.getBoundingClientRect(); seek(((event.clientX - bounds.left) / bounds.width) * timelineDuration); }} onDragOver={(event) => event.preventDefault()} onDrop={dropClip}>{clips.map((clip) => { const trim = trimPreview?.clipId === clip.id ? trimPreview : null; const move = movePreview?.clipId === clip.id ? movePreview : null; const sourceIn = trim ? trim.sourceInFrame : clip.source_in_frame; const sourceOut = trim ? trim.sourceOutFrame : clip.source_out_frame; const start = move ? move.timelineStartFrame : clip.timeline_start_frame; return <div key={clip.id} className={`clip ${clip.id === selectedClipId ? 'selected' : ''}`} draggable={false} onMouseDown={(event) => beginMove(event, clip)} onClick={(event) => { event.stopPropagation(); const bounds = (event.currentTarget.parentElement as HTMLElement).getBoundingClientRect(); seek(((event.clientX - bounds.left) / bounds.width) * timelineDuration); setSelectedClipId(clip.id); setError(''); }} style={{ left: `${start / timelineDuration * 100}%`, width: `${(sourceOut - sourceIn) / timelineDuration * 100}%` }}><span className="trim-handle trim-handle-in" onMouseDown={(event) => beginTrim(event, clip, 'in')} /><span className="clip-label">{asset?.name}</span><span className="trim-handle trim-handle-out" onMouseDown={(event) => beginTrim(event, clip, 'out')} /></div>; })}<div className="playhead" style={{ left: `${frame / timelineDuration * 100}%` }} /></div><div className="timeline-meta">Frame {frame} / {timelineDuration} · {project.fps ? `${project.fps.numerator}/${project.fps.denominator} fps` : 'No media'}{selectedClip ? ` · Selected ${selectedClip.id}` : ''}</div></section><section className="agent-panel"><div className="agent-heading"><h3>Built-in assistant</h3><span>{chatSending ? 'Processing…' : health?.built_in_assistant.configured ? 'Optional OpenAI integration' : 'Not configured'}</span></div>{!health?.built_in_assistant.configured ? <p className="agent-empty">Built-in assistant not configured. Connect an external MCP agent to TextSequence, or set OPENAI_API_KEY to enable this optional assistant.</p> : <><div className="agent-messages">{chatMessages.length === 0 && <p className="agent-empty">Ask the assistant to inspect or edit the current timeline.</p>}{chatMessages.map((item, index) => <article key={`${item.role}-${index}`} className={`agent-message ${item.role}`}><strong>{item.role === 'user' ? 'You' : 'Assistant'}</strong><p>{item.text}</p>{item.actions?.map((action, actionIndex) => <div className="agent-action" key={`${action.tool}-${actionIndex}`}>✓ {action.summary}</div>)}</article>)}</div><div className="agent-input"><input value={chatInput} disabled={chatSending} placeholder="Ask: Split this here" onChange={(event) => setChatInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void sendChat(); }} /><button onClick={() => void sendChat()} disabled={chatSending || !chatInput.trim()}>Send</button></div></>}</section></>}
   </main>;
 }
 

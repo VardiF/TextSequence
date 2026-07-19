@@ -27,9 +27,9 @@ class RenderResult:
 
 def find_ffmpeg() -> Optional[str]:
     candidates = [
-        shutil.which("ffmpeg"),
         os.environ.get("FFMPEG_BIN"),
         str(Path(__file__).resolve().parents[3] / ".tools" / "ffmpeg" / "ffmpeg"),
+        shutil.which("ffmpeg"),
     ]
     for candidate in candidates:
         if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
@@ -40,7 +40,7 @@ def find_ffmpeg() -> Optional[str]:
 def _has_audio(path: str) -> bool:
     ffprobe = find_ffprobe()
     if not ffprobe:
-        raise RenderError("ffprobe is required to inspect source audio")
+        raise RenderError("ffprobe is required to inspect source audio; install FFmpeg or configure FFPROBE_BIN")
     try:
         result = subprocess.run([ffprobe, "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=index", "-of", "json", path], check=True, capture_output=True, text=True)
         return bool(json.loads(result.stdout).get("streams"))
@@ -51,7 +51,7 @@ def _has_audio(path: str) -> bool:
 def _build_command(plan: RenderPlan, output: Path, revision: int, render_type: str) -> list[str]:
     ffmpeg = find_ffmpeg()
     if not ffmpeg:
-        raise RenderError("ffmpeg is required to render a timeline")
+        raise RenderError("ffmpeg is required to render a timeline; install FFmpeg or configure FFMPEG_BIN")
     if not plan.segments:
         raise RenderError("Render plan has no segments")
     audio = _has_audio(next(segment.source_path for segment in plan.segments if isinstance(segment, ClipSegment)))
