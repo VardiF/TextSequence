@@ -31,6 +31,13 @@ class LoadedProject:
     legacy_bytes: Optional[bytes] = None
 
 
+@dataclass(frozen=True)
+class LoadedHistory:
+    """One coherent load of the authoritative project and its HEAD chain."""
+    loaded: LoadedProject
+    records: list[RevisionRecord]
+
+
 class ProjectStore:
     def __init__(self, root: Union[str, Path] = "projects", clock: Callable[[], str] = utc_now,
                  revision_id_factory: Callable[[], str] = new_revision_id) -> None:
@@ -80,12 +87,14 @@ class ProjectStore:
             if os.path.exists(temporary):
                 os.unlink(temporary)
 
-    def _record_for(self, project: Project, parent_revision_id: Optional[str], origin: str, actor: dict[str, str], operation: str, summary: str) -> RevisionRecord:
+    def _record_for(self, project: Project, parent_revision_id: Optional[str], origin: str, actor: dict[str, str], operation: str, summary: str,
+                    restored_from_revision_id: Optional[str] = None) -> RevisionRecord:
         project.validate()
         metadata = RevisionMetadata(project_id=project.id, revision_id=project.revision_id,
                                     revision_number=project.revision, parent_revision_id=parent_revision_id,
                                     created_at=self.clock(), origin=origin, actor=dict(actor),
-                                    operation=operation, summary=summary, snapshot_sha256="")
+                                    operation=operation, summary=summary, snapshot_sha256="",
+                                    restored_from_revision_id=restored_from_revision_id)
         metadata = replace(metadata, snapshot_sha256=revision_hash(metadata, project))
         metadata.validate(project)
         return RevisionRecord(metadata, project_to_dict(project))
@@ -132,6 +141,7 @@ class ProjectStore:
             if parent_id is None:
                 if metadata.revision_number != 0 and metadata.operation != "migration":
                     raise ValidationError("Non-migration root revision must be revision 0")
+                self._validate_restore_provenance(records)
                 return records
 
             validate_revision_id(parent_id)
@@ -143,6 +153,21 @@ class ProjectStore:
             if parent.metadata.revision_number != metadata.revision_number - 1:
                 raise ValidationError("Revision parent must be the immediately preceding revision")
             current = parent
+
+    @staticmethod
+    def _validate_restore_provenance(records: list[RevisionRecord]) -> None:
+        """Validate only non-null restore provenance without changing old null semantics."""
+        reachable_ids = {record.metadata.revision_id for record in records}
+        for index, record in enumerate(records):
+            restored_from = record.metadata.restored_from_revision_id
+            if restored_from is None:
+                continue
+            validate_revision_id(restored_from)
+            if restored_from not in reachable_ids:
+                raise ValidationError("Restore provenance does not reference reachable history")
+            older_ids = {item.metadata.revision_id for item in records[index + 1:]}
+            if restored_from not in older_ids:
+                raise ValidationError("Restore provenance must reference an earlier revision")
 
     def _load_directory_history(self, project_id: str) -> tuple[Project, list[RevisionRecord]]:
         directory = self.directory_for(project_id)
@@ -177,6 +202,15 @@ class ProjectStore:
             return LoadedProject(project, "legacy", path, raw)
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError, ValidationError) as exc:
             raise ValidationError(f"Invalid project file: {path}: {exc}") from exc
+
+    def load_reachable_history(self, project_id: str) -> LoadedHistory:
+        """Load the current authoritative state and validated reachable history once."""
+        directory = self.directory_for(project_id)
+        if directory.is_dir():
+            project, records = self._load_directory_history(project_id)
+            return LoadedHistory(LoadedProject(project, "directory"), records)
+        loaded = self.load_with_source(project_id)
+        return LoadedHistory(loaded, [])
 
     def load(self, project_id: str) -> Project:
         return self.load_with_source(project_id).project
@@ -217,7 +251,8 @@ class ProjectStore:
                 shutil.rmtree(temporary, ignore_errors=True)
 
     def commit(self, loaded: LoadedProject, candidate: Project, parent_revision_id: Optional[str], origin: str,
-               actor: dict[str, str], operation: str, summary: str, expected_revision: int) -> Project:
+               actor: dict[str, str], operation: str, summary: str, expected_revision: int,
+               restored_from_revision_id: Optional[str] = None) -> Project:
         if loaded.project.revision != expected_revision:
             raise StaleRevisionError("Project revision is stale", loaded.project.revision)
         if candidate.id != loaded.project.id or candidate.revision != expected_revision + 1:
@@ -227,7 +262,8 @@ class ProjectStore:
         if candidate.revision_id == loaded.project.revision_id:
             raise ValidationError("Committed project needs a new revision_id")
         candidate.validate()
-        record = self._record_for(candidate, parent_revision_id, origin, actor, operation, summary)
+        record = self._record_for(candidate, parent_revision_id, origin, actor, operation, summary,
+                                  restored_from_revision_id=restored_from_revision_id)
         directory = self.directory_for(candidate.id)
         promoted = False
         revision_written = False
@@ -282,12 +318,8 @@ class ProjectStore:
         return [self.load(project_id) for project_id in sorted(ids)]
 
     def reachable_revisions(self, project_id: str) -> tuple[bool, list[RevisionRecord]]:
-        directory = self.directory_for(project_id)
-        if directory.is_dir():
-            _, records = self._load_directory_history(project_id)
-            return True, records
-        loaded = self.load_with_source(project_id)
-        return loaded.source == "directory", []
+        history = self.load_reachable_history(project_id)
+        return history.loaded.source == "directory", history.records
 
     def reachable_revision(self, project_id: str, revision_id: str) -> RevisionRecord:
         validate_revision_id(revision_id)

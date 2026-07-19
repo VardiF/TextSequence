@@ -18,6 +18,8 @@ from app.services.projections import revision_metadata_projection, revision_proj
 from app.services.query import QueryValidationError
 from app.services.revision_diff import RevisionDiffError
 from app.services.transactions import TransactionError
+from app.services.restore import RestoreError
+from app.restore_models import RestoreRevisionRequest
 from copy import deepcopy
 
 router = APIRouter(prefix="/api")
@@ -132,7 +134,7 @@ def health():
     return {
         "status": "ok",
         "ffprobe": {"available": bool(ffprobe), "path": ffprobe},
-        "mcp": {"status": "running", "endpoint": "http://127.0.0.1:8000/mcp", "transport": "Streamable HTTP", "tool_count": 18, "resource_count": 8},
+        "mcp": {"status": "running", "endpoint": "http://127.0.0.1:8000/mcp", "transport": "Streamable HTTP", "tool_count": 19, "resource_count": 8},
         "built_in_assistant": {"configured": agent_runtime.configured()},
     }
 
@@ -292,6 +294,34 @@ def get_revision(project_id: str, revision_id: str):
         raise HTTPException(404, {"code": "PROJECT_NOT_FOUND", "message": "Project does not exist"}) from exc
     except ValidationError as exc:
         raise HTTPException(500, {"code": "INTEGRITY_ERROR", "message": "Project integrity validation failed"}) from exc
+
+
+def _restore_http_error(exc: RestoreError) -> HTTPException:
+    status = {
+        "INVALID_ARGUMENT": 400,
+        "NO_CHANGES": 400,
+        "PROJECT_NOT_FOUND": 404,
+        "HISTORY_UNAVAILABLE": 404,
+        "REVISION_NOT_FOUND": 404,
+        "REVISION_CONFLICT": 409,
+        "INTEGRITY_ERROR": 500,
+        "PERSISTENCE_ERROR": 500,
+    }.get(exc.code, 500)
+    detail = {"code": exc.code, "message": exc.message}
+    if exc.current_revision is not None:
+        detail["current_revision"] = exc.current_revision
+    if exc.current_revision_id is not None:
+        detail["current_revision_id"] = exc.current_revision_id
+    return HTTPException(status, detail)
+
+
+@router.post("/projects/{project_id}/revisions/{target_revision_id}/restore")
+def restore_revision(project_id: str, target_revision_id: str, request: RestoreRevisionRequest):
+    try:
+        return service.restore_revision(project_id, target_revision_id, request,
+                                        origin="rest", actor={"type": "human"}).model_dump(mode="json")
+    except RestoreError as exc:
+        raise _restore_http_error(exc) from exc
 
 
 @router.get("/projects/{project_id}/assets/{asset_id}/media")

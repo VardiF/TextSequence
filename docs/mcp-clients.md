@@ -15,7 +15,7 @@ The MCP endpoint remains available without `OPENAI_API_KEY`.
 
 ## Available tools
 
-The current server exposes exactly these 18 tools:
+The current server exposes exactly these 19 tools:
 
 ### `list_projects()`
 
@@ -126,6 +126,23 @@ reported as a redacted `/source_location` field and never include path values.
 Missing or unreachable revisions return `REVISION_NOT_FOUND`; legacy flat
 projects without promoted history return `HISTORY_UNAVAILABLE`.
 
+### `restore_revision(project_id, target_revision_id, expected_revision, expected_revision_id)`
+
+Restores the full canonical snapshot of one explicit revision reachable from
+the current HEAD. Restore is forward-only: it creates one new revision whose
+parent is the current HEAD and whose `restored_from_revision_id` identifies
+the source snapshot. It never rewrites history or moves HEAD backward.
+
+The client must provide both the exact current revision number and revision ID.
+Use `diff_revisions(current_revision_id, target_revision_id)` as the safe
+preview; the preview does not reserve the base, so a `REVISION_CONFLICT`
+requires reloading the current revision and previewing again. Identical
+canonical state returns `NO_CHANGES`. Historical source paths are restored
+internally but never returned, and missing media does not block restore.
+
+REST equivalent: `POST /api/projects/{project_id}/revisions/{target_revision_id}/restore`
+with `{ "expected_revision": N, "expected_revision_id": "revision_id" }`.
+
 ### `prepare_transaction(project_id, expected_revision, operations)`
 
 Prepares an ordered, stateless batch without writing HEAD, revision files, or
@@ -190,6 +207,8 @@ The equivalent REST read routes are `GET /api/projects/{project_id}/timeline`,
 `GET /api/projects/{project_id}/revisions/{revision_id}`. Revision comparison
 is available at
 `GET /api/projects/{project_id}/revisions/{from_revision_id}/diff/{to_revision_id}`.
+Restore is available at
+`POST /api/projects/{project_id}/revisions/{target_revision_id}/restore`.
 
 ## Recommended client workflow
 

@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 from uuid import uuid4
 
-from app.domain.models import Project, ValidationError, project_to_dict
+from app.domain.models import Project, ValidationError, project_to_dict, validate_revision_id
 
 
 def canonical_json(data: dict[str, Any]) -> str:
@@ -50,6 +50,8 @@ class RevisionMetadata:
             raise ValidationError("Invalid revision actor type")
         if not self.operation or len(self.summary) > 240:
             raise ValidationError("Invalid revision audit metadata")
+        if self.restored_from_revision_id is not None:
+            validate_revision_id(self.restored_from_revision_id)
         if self.snapshot_sha256 != revision_hash(self, project):
             raise ValidationError("Revision integrity digest does not match revision metadata and project")
 

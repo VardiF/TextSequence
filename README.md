@@ -30,13 +30,13 @@ Suggested recording assets:
 
 ## Features
 
-Implemented in v0.3.0:
+Implemented in v0.3.1:
 
 - local MP4 import and media streaming;
 - canonical integer-frame V1 timeline with stable IDs;
 - clip selection, split, trim, move, and delete;
 - Render Preview and MP4 export through local FFmpeg;
-- real Streamable HTTP MCP server with 18 tools, including timeline querying, deterministic revision diffs, marker mutations, and stateless transactions;
+- real Streamable HTTP MCP server with 19 tools, including timeline querying, deterministic revision diffs, forward-only revision restore, marker mutations, and stateless transactions;
 - eight read-only MCP Resources plus safe REST timeline/query/revision/diff reads;
 - canonical point and range timeline markers with deterministic ordering;
 - revision-safe human and external-agent co-editing;
@@ -106,7 +106,7 @@ external references.
 The deliberate Node choice is Node 18 + Vite 6: this pinned configuration is
 stable and the production build passes; upgrading Node is not needed for this
 release. The backend remains compatible with the existing Node 18 frontend
-toolchain; no Node upgrade is required for v0.3.0.
+toolchain; no Node upgrade is required for v0.3.1.
 
 ## Canonical project and revisions
 
@@ -145,7 +145,7 @@ revision and stable IDs, mutate with `expected_revision`, then inspect again.
 
 ## Available MCP tools
 
-The server exposes exactly 18 tools:
+The server exposes exactly 19 tools:
 
 1. `list_projects`
 2. `get_timeline`
@@ -165,6 +165,7 @@ The server exposes exactly 18 tools:
 16. `diff_revisions`
 17. `prepare_transaction`
 18. `commit_transaction`
+19. `restore_revision`
 
 The server also exposes eight read-only JSON Resources: the project collection,
 current project, current timeline, asset, clip, marker, revision collection,
@@ -175,6 +176,16 @@ never expose source paths or raw revision snapshots.
 explicit HEAD-reachable immutable revisions in the requested direction. It
 returns deterministic field changes and safe added/removed entity values;
 asset source-location changes are represented only by a redacted field marker.
+
+`restore_revision(project_id, target_revision_id, expected_revision,
+expected_revision_id)` restores the authoritative snapshot of one explicit
+HEAD-reachable revision as one new forward revision. It never moves HEAD
+backward or rewrites history. The current revision and revision ID must both
+match exactly; `diff_revisions` is the safe preview and does not reserve that
+base. Restore records direct `restored_from_revision_id` provenance, returns
+`NO_CHANGES` for identical canonical state, preserves source paths internally,
+and does not check, copy, or reconstruct media. Legacy flat projects report
+`HISTORY_UNAVAILABLE` until normal history promotion.
 
 See [docs/mcp-clients.md](docs/mcp-clients.md) for parameters and response
 contracts.

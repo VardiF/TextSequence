@@ -164,6 +164,12 @@ class RevisionDiffSummary(_StrictModel):
     by_entity_type: RevisionDiffByEntityType
 
 
+class ProjectStateDiff(_StrictModel):
+    """The shared summary/change contract used by transactions and restore."""
+    summary: RevisionDiffSummary
+    changes: RevisionChanges
+
+
 class RevisionDiffMetadata(_StrictModel):
     project_id: str
     revision_id: str
