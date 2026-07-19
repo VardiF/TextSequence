@@ -15,7 +15,7 @@ The MCP endpoint remains available without `OPENAI_API_KEY`.
 
 ## Available tools
 
-The current server exposes exactly these 15 tools:
+The current server exposes exactly these 16 tools:
 
 ### `list_projects()`
 
@@ -116,6 +116,16 @@ mutually exclusive. Clips match a containing frame or overlapping half-open
 range; markers use their point or half-open range semantics. Results are
 deterministically ordered and contain no source filesystem paths.
 
+### `diff_revisions(project_id, from_revision_id, to_revision_id)`
+
+Compares two explicit immutable revisions reachable from current HEAD. The
+result is directional (`forward`, `reverse`, or `same`) and contains strict
+machine-readable project, timeline, asset, track, clip, and marker changes.
+Only approved canonical fields are compared. Asset source-location changes are
+reported as a redacted `/source_location` field and never include path values.
+Missing or unreachable revisions return `REVISION_NOT_FOUND`; legacy flat
+projects without promoted history return `HISTORY_UNAVAILABLE`.
+
 ## Read-only Resources
 
 The server exposes exactly eight read-only JSON Resources:
@@ -139,7 +149,9 @@ encoded separators.
 The equivalent REST read routes are `GET /api/projects/{project_id}/timeline`,
 `POST /api/projects/{project_id}/timeline/query`,
 `GET /api/projects/{project_id}/revisions`, and
-`GET /api/projects/{project_id}/revisions/{revision_id}`.
+`GET /api/projects/{project_id}/revisions/{revision_id}`. Revision comparison
+is available at
+`GET /api/projects/{project_id}/revisions/{from_revision_id}/diff/{to_revision_id}`.
 
 ## Recommended client workflow
 

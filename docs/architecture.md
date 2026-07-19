@@ -42,12 +42,16 @@ flowchart TD
   and silence endpoints without duplicating domain rules.
 - **MCP Adapter:** exposes the same service through Streamable HTTP. It returns
   safe projections and never exposes source paths through timeline inspection.
-  v0.2.2 adds eight read-only Resources and the typed `query_timeline` tool;
-  resource and REST reads reuse the same projection layer.
+  v0.2.3 adds the typed `query_timeline` and `diff_revisions` tools; eight
+  read-only Resources and REST reads reuse the same safe read boundaries.
 - **Read Surface:** project, timeline, asset, clip, marker, and revision
   projections are transport-neutral. Revision reads walk only the chain
   reachable from HEAD and never promote legacy flat projects or expose raw
   snapshots.
+- **Revision Diff:** resolves both explicit revision IDs from one validated
+  HEAD-reachable history load, then calls a pure explicit-field comparator. It
+  never compares raw snapshot dictionaries, mutates persistence, or emits
+  source locations.
 - **FFmpeg Render Plan:** compiles canonical clips and gaps into a deterministic
   local FFmpeg command for preview or export.
 

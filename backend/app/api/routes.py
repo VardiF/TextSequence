@@ -16,6 +16,7 @@ from app.persistence.project_store import StaleRevisionError
 from app.persistence.project_store import RevisionNotFoundError
 from app.services.projections import revision_metadata_projection, revision_projection
 from app.services.query import QueryValidationError
+from app.services.revision_diff import RevisionDiffError
 from copy import deepcopy
 
 router = APIRouter(prefix="/api")
@@ -130,7 +131,7 @@ def health():
     return {
         "status": "ok",
         "ffprobe": {"available": bool(ffprobe), "path": ffprobe},
-        "mcp": {"status": "running", "endpoint": "http://127.0.0.1:8000/mcp", "transport": "Streamable HTTP", "tool_count": 15, "resource_count": 8},
+        "mcp": {"status": "running", "endpoint": "http://127.0.0.1:8000/mcp", "transport": "Streamable HTTP", "tool_count": 16, "resource_count": 8},
         "built_in_assistant": {"configured": agent_runtime.configured()},
     }
 
@@ -225,6 +226,24 @@ def list_revisions(project_id: str):
         raise HTTPException(404, {"code": "PROJECT_NOT_FOUND", "message": "Project does not exist"}) from exc
     except ValidationError as exc:
         raise HTTPException(500, {"code": "INTEGRITY_ERROR", "message": "Project integrity validation failed"}) from exc
+
+
+@router.get("/projects/{project_id}/revisions/{from_revision_id}/diff/{to_revision_id}")
+def diff_revisions(project_id: str, from_revision_id: str, to_revision_id: str):
+    try:
+        return service.diff_revisions(project_id, from_revision_id, to_revision_id)
+    except RevisionNotFoundError as exc:
+        raise HTTPException(404, {"code": "REVISION_NOT_FOUND", "message": "Revision does not exist"}) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(404, {"code": "PROJECT_NOT_FOUND", "message": "Project does not exist"}) from exc
+    except RevisionDiffError as exc:
+        status = 500 if exc.code == "INTEGRITY_ERROR" else 404 if exc.code == "HISTORY_UNAVAILABLE" else 400
+        messages = {
+            "INTEGRITY_ERROR": "Revision history integrity validation failed",
+            "HISTORY_UNAVAILABLE": "Revision history is unavailable for this project",
+            "INVALID_ARGUMENT": "Invalid project or revision identifier",
+        }
+        raise HTTPException(status, {"code": exc.code, "message": messages.get(exc.code, "Invalid argument")}) from exc
 
 
 @router.get("/projects/{project_id}/revisions/{revision_id}")

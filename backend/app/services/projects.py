@@ -8,18 +8,22 @@ from threading import Lock, RLock
 from typing import Optional
 from uuid import uuid4
 
-from app.domain.models import Marker, ValidationError, marker_production_from_dict
+from app.domain.models import Marker, ValidationError, marker_production_from_dict, project_from_dict, validate_revision_id
 from app.domain.silence import SourceRemovalRange, apply_silence_removals
 from app.audio.silence import AssetSilenceAnalysis, SilenceAnalysisError, analyze_asset, milliseconds_to_frames, silence_dict, validate_parameters
 from app.domain.operations import add_marker, delete_clip, delete_marker, move_clip, new_marker_id, new_project, register_asset, split_clip, trim_clip, update_marker
 from app.domain.models import project_to_dict
 from app.media.probe import probe_media
-from app.persistence.project_store import ProjectStore, StaleRevisionError
+from app.persistence.project_store import ProjectStore, RevisionNotFoundError, StaleRevisionError
 from app.rendering.ffmpeg import RenderResult, render_plan
 from app.rendering.plan import compile_render_plan
 from app.services.timeline import timeline_projection
 from app.services.query import query_timeline
 from app.services.projections import project_summary_projection
+from app.services.revision_diff import (RevisionDiffError, RevisionDiffIntegrityError,
+                                        RevisionHistoryUnavailableError, diff_projects, summarize_changes)
+from app.revision_diff_models import RevisionDiffMetadata, RevisionDiffResult
+from app.services.projections import revision_metadata_projection
 
 
 class ProjectService:
@@ -53,6 +57,62 @@ class ProjectService:
 
     def revision_record(self, project_id: str, revision_id: str):
         return self.store.reachable_revision(project_id, revision_id)
+
+    def diff_revisions(self, project_id: str, from_revision_id: str, to_revision_id: str) -> RevisionDiffResult:
+        try:
+            self.store.path_for(project_id)
+            validate_revision_id(from_revision_id)
+            validate_revision_id(to_revision_id)
+        except ValidationError as exc:
+            raise RevisionDiffError("INVALID_ARGUMENT", "Invalid project or revision identifier") from exc
+
+        try:
+            history_available, records = self.store.reachable_revisions(project_id)
+        except FileNotFoundError:
+            raise
+        except ValidationError as exc:
+            raise RevisionDiffError("INTEGRITY_ERROR", "Revision history integrity validation failed") from exc
+        if not history_available:
+            raise RevisionHistoryUnavailableError()
+
+        by_id = {record.metadata.revision_id: (index, record) for index, record in enumerate(records)}
+        if from_revision_id not in by_id or to_revision_id not in by_id:
+            raise RevisionNotFoundError("Revision does not exist")
+        from_index, from_record = by_id[from_revision_id]
+        to_index, to_record = by_id[to_revision_id]
+        try:
+            if from_record.metadata.project_id != project_id or to_record.metadata.project_id != project_id:
+                raise RevisionDiffIntegrityError("Revision belongs to another project")
+            before = project_from_dict(from_record.snapshot)
+            after = project_from_dict(to_record.snapshot)
+            if before.id != project_id or after.id != project_id:
+                raise RevisionDiffIntegrityError("Revision snapshot belongs to another project")
+            if before.timeline.id != after.timeline.id:
+                raise RevisionDiffIntegrityError("Compared timelines have different identities")
+            changes = diff_projects(before, after)
+            summary = summarize_changes(changes)
+        except (ValidationError, RevisionDiffIntegrityError) as exc:
+            raise RevisionDiffError("INTEGRITY_ERROR", "Revision history integrity validation failed") from exc
+
+        if from_index == to_index:
+            direction = "same"
+        elif from_index > to_index:
+            direction = "forward"
+        else:
+            direction = "reverse"
+        return RevisionDiffResult(
+            project_id=project_id,
+            timeline_id=before.timeline.id,
+            direction=direction,
+            from_revision=RevisionDiffMetadata.model_validate(
+                revision_metadata_projection(from_record.metadata, is_head=from_index == 0)
+            ),
+            to_revision=RevisionDiffMetadata.model_validate(
+                revision_metadata_projection(to_record.metadata, is_head=to_index == 0)
+            ),
+            summary=summary,
+            changes=changes,
+        )
 
     @staticmethod
     def _analysis_output(project_id: str, revision: int, analyses: list[AssetSilenceAnalysis], minimum_silence_ms: int, noise_threshold_db: float) -> dict:

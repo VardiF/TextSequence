@@ -110,7 +110,7 @@ class ProjectStore:
             raise ValidationError("Revision record ID does not match its path")
         return record
 
-    def _validate_reachable_chain(self, directory: Path, head_record: RevisionRecord) -> None:
+    def _validate_reachable_chain(self, directory: Path, head_record: RevisionRecord) -> list[RevisionRecord]:
         """Validate the linear parent chain reachable from HEAD.
 
         The migration baseline is a legitimate root even when its revision
@@ -119,18 +119,20 @@ class ProjectStore:
         """
         current = head_record
         visited: set[str] = set()
+        records: list[RevisionRecord] = []
         while True:
             metadata = current.metadata
             revision_id = metadata.revision_id
             if revision_id in visited:
                 raise ValidationError("Revision parent chain contains a cycle")
             visited.add(revision_id)
+            records.append(current)
 
             parent_id = metadata.parent_revision_id
             if parent_id is None:
                 if metadata.revision_number != 0 and metadata.operation != "migration":
                     raise ValidationError("Non-migration root revision must be revision 0")
-                return
+                return records
 
             validate_revision_id(parent_id)
             if parent_id in visited:
@@ -142,7 +144,7 @@ class ProjectStore:
                 raise ValidationError("Revision parent must be the immediately preceding revision")
             current = parent
 
-    def _load_directory(self, project_id: str) -> Project:
+    def _load_directory_history(self, project_id: str) -> tuple[Project, list[RevisionRecord]]:
         directory = self.directory_for(project_id)
         try:
             with (directory / "head.json").open(encoding="utf-8") as handle:
@@ -150,13 +152,16 @@ class ProjectStore:
             validate_revision_id(head.revision_id)
             record = self._load_revision_record(directory, head.revision_id)
             project = project_from_dict(record.snapshot)
-            self._validate_reachable_chain(directory, record)
+            records = self._validate_reachable_chain(directory, record)
             if snapshot_hash(record.snapshot) != head.snapshot_sha256:
                 raise ValidationError("HEAD and revision snapshot hashes differ")
             head.validate(project)
-            return project
+            return project, records
         except (OSError, json.JSONDecodeError, KeyError, TypeError, ValidationError) as exc:
             raise ValidationError(f"Invalid directory-backed project: {directory}: {exc}") from exc
+
+    def _load_directory(self, project_id: str) -> Project:
+        return self._load_directory_history(project_id)[0]
 
     def load_with_source(self, project_id: str) -> LoadedProject:
         directory = self.directory_for(project_id)
@@ -252,19 +257,12 @@ class ProjectStore:
         return [self.load(project_id) for project_id in sorted(ids)]
 
     def reachable_revisions(self, project_id: str) -> tuple[bool, list[RevisionRecord]]:
-        loaded = self.load_with_source(project_id)
-        if loaded.source != "directory":
-            return False, []
         directory = self.directory_for(project_id)
-        record = self._load_revision_record(directory, loaded.project.revision_id)
-        self._validate_reachable_chain(directory, record)
-        records = []
-        current = record
-        while current is not None:
-            records.append(current)
-            parent_id = current.metadata.parent_revision_id
-            current = self._load_revision_record(directory, parent_id) if parent_id else None
-        return True, records
+        if directory.is_dir():
+            _, records = self._load_directory_history(project_id)
+            return True, records
+        loaded = self.load_with_source(project_id)
+        return loaded.source == "directory", []
 
     def reachable_revision(self, project_id: str, revision_id: str) -> RevisionRecord:
         validate_revision_id(revision_id)

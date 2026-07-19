@@ -11,6 +11,9 @@ from app.domain.models import TimelineConflictError, ValidationError
 from app.persistence.project_store import StaleRevisionError
 from app.mcp_contracts import McpResult, ProjectSummaryOutput, QueryOutput
 from app.mcp_resources import register_resources
+from app.persistence.project_store import RevisionNotFoundError
+from app.revision_diff_models import RevisionDiffErrorOutput, RevisionDiffResult
+from app.services.revision_diff import RevisionDiffError
 
 mcp = FastMCP("TextSequence", instructions="Local-first TextSequence project collaboration.", streamable_http_path="/")
 
@@ -18,6 +21,8 @@ mcp = FastMCP("TextSequence", instructions="Local-first TextSequence project col
 def _error(exc: Exception) -> dict[str, Any]:
     if isinstance(exc, StaleRevisionError): code = "STALE_REVISION"
     elif isinstance(exc, TimelineConflictError): code = "TIMELINE_CONFLICT"
+    elif isinstance(exc, RevisionNotFoundError): code = "REVISION_NOT_FOUND"
+    elif isinstance(exc, RevisionDiffError): code = exc.code
     elif isinstance(exc, FileNotFoundError): code = "PROJECT_NOT_FOUND"
     elif isinstance(exc, SilenceAnalysisError): code = exc.code
     elif isinstance(exc, ValidationError) and "Clip does not exist" in str(exc): code = "CLIP_NOT_FOUND"
@@ -31,6 +36,10 @@ def _error(exc: Exception) -> dict[str, Any]:
         "STALE_REVISION": "Project revision is stale",
         "TIMELINE_CONFLICT": "Timeline operation conflicts with an existing clip",
         "NO_CHANGES": "The requested operation would not change the project",
+        "REVISION_NOT_FOUND": "Revision does not exist",
+        "HISTORY_UNAVAILABLE": "Revision history is unavailable for this project",
+        "INTEGRITY_ERROR": "Revision history integrity validation failed",
+        "INVALID_ARGUMENT": "Invalid argument",
     }
     result = {"ok": False, "error": {"code": code, "message": messages.get(code, "Invalid argument")}}
     if isinstance(exc, StaleRevisionError) and exc.current_revision is not None:
@@ -177,6 +186,14 @@ def export_project(project_id: str, expected_revision: int) -> McpResult:
 def query_timeline(project_id: str, query: dict[str, Any]) -> QueryOutput | McpResult:
     try:
         return application.projects.query_timeline(project_id, query)
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(structured_output=True)
+def diff_revisions(project_id: str, from_revision_id: str, to_revision_id: str) -> RevisionDiffResult | RevisionDiffErrorOutput:
+    try:
+        return application.projects.diff_revisions(project_id, from_revision_id, to_revision_id).model_dump(mode="json")
     except Exception as exc:
         return _error(exc)
 
