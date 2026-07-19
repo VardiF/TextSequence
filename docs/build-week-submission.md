@@ -49,7 +49,7 @@ persistence deterministically.
 - Local CFR H.264/AAC media import and streaming
 - Integer-frame V1 timeline with split, trim, move, and delete
 - Render Preview and MP4 export
-- 11 MCP tools with revision-safe mutations
+- 14 MCP tools with revision-safe mutations, including canonical marker edits
 - Deterministic local silence analysis and removal
 - Human and external MCP co-editing through canonical JSON
 

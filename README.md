@@ -30,13 +30,14 @@ Suggested recording assets:
 
 ## Features
 
-Implemented in v0.2.0:
+Implemented in v0.2.1:
 
 - local MP4 import and media streaming;
 - canonical integer-frame V1 timeline with stable IDs;
 - clip selection, split, trim, move, and delete;
 - Render Preview and MP4 export through local FFmpeg;
-- real Streamable HTTP MCP server with 11 tools;
+- real Streamable HTTP MCP server with 14 tools, including marker mutations;
+- canonical point and range timeline markers with deterministic ordering;
 - revision-safe human and external-agent co-editing;
 - schema-v2 canonical projects with explicit Timeline identity;
 - immutable full-snapshot revision history with safe v1 promotion; and
@@ -143,7 +144,7 @@ revision and stable IDs, mutate with `expected_revision`, then inspect again.
 
 ## Available MCP tools
 
-The server exposes exactly 11 tools:
+The server exposes exactly 14 tools:
 
 1. `list_projects`
 2. `get_timeline`
@@ -156,6 +157,9 @@ The server exposes exactly 11 tools:
 9. `trim_clip`
 10. `render_preview`
 11. `export_project`
+12. `add_marker`
+13. `update_marker`
+14. `delete_marker`
 
 See [docs/mcp-clients.md](docs/mcp-clients.md) for parameters and response
 contracts.
@@ -169,6 +173,14 @@ analyze_silence(project_id, minimum_silence_ms=700, noise_threshold_db=-35)
 remove_silence(project_id, expected_revision=current_revision)
 render_preview(project_id, expected_revision=new_revision)
 ```
+
+Timeline markers are canonical absolute-frame metadata under
+`project.timeline.markers`. Point markers use `end_frame: null`; range markers
+use the exclusive interval `[start_frame, end_frame)`. Marker edits are
+revision-checked and do not follow, rebase, or delete with clips. The timeline
+projection reports `content_end_frame` separately from `display_end_frame`, so
+markers beyond media remain visible without extending playback or render
+duration.
 
 ## Optional built-in assistant
 

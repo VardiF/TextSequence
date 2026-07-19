@@ -21,6 +21,10 @@ flowchart TD
   are serialized to validated schema-v2 JSON with stable opaque IDs. The
   canonical shape is `Project.timeline.tracks`; top-level REST `tracks` is only
   a compatibility alias.
+- **Timeline Markers:** typed absolute-frame point and range markers are owned
+  by `Project.timeline.markers`, sorted by start, effective end, and ID. They
+  use generic production references only; marker mutations share the same
+  domain/service/commit path as clip edits.
 - **Timeline Domain Operations:** framework-independent split, delete, move,
   trim, and silence-removal operations validate frame bounds and collisions.
 - **ProjectService:** loads authoritative state, clones it, applies a domain
@@ -40,6 +44,12 @@ flowchart TD
   safe projections and never exposes source paths through timeline inspection.
 - **FFmpeg Render Plan:** compiles canonical clips and gaps into a deterministic
   local FFmpeg command for preview or export.
+
+Marker state remains in schema v2 and participates in immutable snapshots,
+revision integrity digests, HEAD validation, parent-chain validation, and
+restart/reload. A v0.2.0 binary cannot open a marker-bearing v0.2.1 project,
+because v0.2.0 deliberately rejected nonempty marker collections; empty-marker
+v0.2.0 projects and v0.1.x migrations remain compatible.
 - **Managed Browser Media:** multipart uploads are written atomically under the
   ignored local `media/{project_id}` root, probed, and then imported through the
   same revision-checked service path. Failed probes or stale commits remove the

@@ -55,6 +55,33 @@ class TrimMutation(ClipMutation):
     source_out_frame: Optional[int] = None
 
 
+class MarkerProductionPayload(BaseModel):
+    shot_ids: list[str] = []
+    dialogue_line_ids: list[str] = []
+    external_refs: list[dict] = []
+
+
+class AddMarkerMutation(BaseModel):
+    expected_revision: int
+    start_frame: int
+    end_frame: Optional[int] = None
+    name: str
+    description: str = ""
+    type: str = "generic"
+    production: MarkerProductionPayload = MarkerProductionPayload()
+
+
+class UpdateMarkerMutation(BaseModel):
+    marker_id: str
+    expected_revision: int
+    changes: dict
+
+
+class DeleteMarkerMutation(BaseModel):
+    marker_id: str
+    expected_revision: int
+
+
 class RenderRequest(BaseModel):
     expected_revision: int
 
@@ -64,6 +91,7 @@ class EditorContextSnapshot(BaseModel):
     project_id: str
     observed_revision: int
     selected_clip_id: Optional[str] = None
+    selected_marker_id: Optional[str] = None
     playhead_frame: int = 0
     visible_track_id: Optional[str] = None
 
@@ -90,7 +118,7 @@ def health():
     return {
         "status": "ok",
         "ffprobe": {"available": bool(ffprobe), "path": ffprobe},
-        "mcp": {"status": "running", "endpoint": "http://127.0.0.1:8000/mcp", "transport": "Streamable HTTP", "tool_count": 11},
+        "mcp": {"status": "running", "endpoint": "http://127.0.0.1:8000/mcp", "transport": "Streamable HTTP", "tool_count": 14},
         "built_in_assistant": {"configured": agent_runtime.configured()},
     }
 
@@ -226,6 +254,59 @@ def trim(project_id: str, request: TrimMutation):
         return _rest_project(service.trim(project_id, request.clip_id, request.expected_revision, request.source_in_frame, request.source_out_frame, origin="rest", actor={"type": "human"}))
     except (StaleRevisionError, ValidationError, FileNotFoundError) as exc:
         raise _mutation_error(exc) from exc
+
+
+@router.post("/projects/{project_id}/markers/add")
+def add_marker(project_id: str, request: AddMarkerMutation):
+    try:
+        before = service.get(project_id)
+        prior_ids = {marker.id for marker in before.timeline.markers}
+        result = service.add_marker(project_id, request.expected_revision, request.start_frame, request.end_frame,
+                                    request.name, request.description, request.type, request.production.model_dump(),
+                                    origin="rest", actor={"type": "human"})
+        response = _rest_project(result)
+        response["marker_id"] = next(marker["id"] for marker in response["timeline"]["markers"] if marker["id"] not in prior_ids)
+        return response
+    except StaleRevisionError as exc:
+        raise HTTPException(409, {"code": "STALE_REVISION", "message": str(exc), "current_revision": exc.current_revision}) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValidationError as exc:
+        raise HTTPException(400, {"code": "INVALID_MARKER", "message": str(exc)}) from exc
+
+
+@router.post("/projects/{project_id}/markers/update")
+def update_marker(project_id: str, request: UpdateMarkerMutation):
+    try:
+        result = service.update_marker(project_id, request.expected_revision, request.marker_id, request.changes,
+                                       origin="rest", actor={"type": "human"})
+        response = _rest_project(result)
+        response["marker_id"] = request.marker_id
+        return response
+    except StaleRevisionError as exc:
+        raise HTTPException(409, {"code": "STALE_REVISION", "message": str(exc), "current_revision": exc.current_revision}) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValidationError as exc:
+        code = "NO_CHANGES" if "no changes" in str(exc).lower() else "MARKER_NOT_FOUND" if "Marker does not exist" in str(exc) else "INVALID_MARKER"
+        raise HTTPException(400, {"code": code, "message": str(exc)}) from exc
+
+
+@router.post("/projects/{project_id}/markers/delete")
+def delete_marker(project_id: str, request: DeleteMarkerMutation):
+    try:
+        result = service.delete_marker(project_id, request.expected_revision, request.marker_id,
+                                       origin="rest", actor={"type": "human"})
+        response = _rest_project(result)
+        response["deleted_marker_id"] = request.marker_id
+        return response
+    except StaleRevisionError as exc:
+        raise HTTPException(409, {"code": "STALE_REVISION", "message": str(exc), "current_revision": exc.current_revision}) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValidationError as exc:
+        code = "MARKER_NOT_FOUND" if "Marker does not exist" in str(exc) else "INVALID_MARKER"
+        raise HTTPException(400, {"code": code, "message": str(exc)}) from exc
 
 
 def _render_response(result):
