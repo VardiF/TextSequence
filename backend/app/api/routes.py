@@ -32,6 +32,15 @@ def _rest_project(project):
     return data
 
 
+def _rest_project_read_error(exc: Exception) -> HTTPException:
+    """Map storage read failures without exposing local persistence details."""
+    if isinstance(exc, FileNotFoundError):
+        return HTTPException(404, {"code": "PROJECT_NOT_FOUND", "message": "Project does not exist"})
+    if isinstance(exc, ValidationError):
+        return HTTPException(500, {"code": "INTEGRITY_ERROR", "message": "Project integrity validation failed"})
+    return HTTPException(500, {"code": "INTEGRITY_ERROR", "message": "Project integrity validation failed"})
+
+
 class CreateProject(BaseModel):
     name: str = "Untitled project"
 
@@ -189,7 +198,7 @@ def get_timeline(project_id: str):
     try:
         return service.timeline(project_id)
     except (FileNotFoundError, ValidationError) as exc:
-        raise HTTPException(404, {"code": "PROJECT_NOT_FOUND", "message": "Project does not exist"}) from exc
+        raise _rest_project_read_error(exc) from exc
 
 
 @router.post("/projects/{project_id}/timeline/query")
@@ -198,8 +207,10 @@ def query_timeline_route(project_id: str, request: dict):
         return service.query_timeline(project_id, request)
     except FileNotFoundError as exc:
         raise HTTPException(404, {"code": "PROJECT_NOT_FOUND", "message": "Project does not exist"}) from exc
-    except (ValidationError, QueryValidationError) as exc:
+    except QueryValidationError as exc:
         raise HTTPException(400, {"code": "INVALID_QUERY", "message": str(exc)}) from exc
+    except ValidationError as exc:
+        raise _rest_project_read_error(exc) from exc
 
 
 @router.get("/projects/{project_id}/revisions")

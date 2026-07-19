@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import pytest
 from fastapi.testclient import TestClient
 
@@ -117,3 +118,35 @@ def test_registered_mcp_resource_reads_are_json_envelopes(tmp_path, monkeypatch)
     assert payload["resource_type"] == "timeline"
     assert payload["uri"] == uri
     assert "path" not in str(payload)
+
+
+def test_rest_read_integrity_failures_are_sanitized(tmp_path, monkeypatch):
+    service, project = seeded_service(tmp_path)
+    monkeypatch.setattr(routes, "service", service)
+    directory = service.store.directory_for(project.id)
+    head = json.loads((directory / "head.json").read_text())
+    revision_path = directory / "revisions" / f"{head['revision_id']}.json"
+    record = json.loads(revision_path.read_text())
+    record["metadata"]["snapshot_sha256"] = "0" * 64
+    revision_path.write_text(json.dumps(record))
+    with pytest.raises(ValidationError) as internal:
+        service.get(project.id)
+    raw_error = str(internal.value)
+
+    client = TestClient(app)
+    responses = [
+        client.post(f"/api/projects/{project.id}/timeline/query", json={"entity_types": ["clip"], "frame": 1}),
+        client.get(f"/api/projects/{project.id}/timeline"),
+        client.get(f"/api/projects/{project.id}/revisions"),
+        client.get(f"/api/projects/{project.id}/revisions/{head['revision_id']}"),
+    ]
+    for response in responses:
+        body = response.text
+        assert response.status_code == 500
+        assert response.json()["detail"]["code"] == "INTEGRITY_ERROR"
+        assert "Project integrity validation failed" in body
+        assert raw_error not in body
+        assert "/Users/" not in body
+        assert "/var/" not in body
+        assert str(directory) not in body
+        assert revision_path.name not in body
