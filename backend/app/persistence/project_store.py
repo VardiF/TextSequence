@@ -5,12 +5,12 @@ import os
 import re
 import shutil
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Optional, Union
 
 from app.domain.models import Project, ValidationError, project_from_dict, project_to_dict, validate_revision_id
-from app.persistence.revisions import HeadPointer, RevisionMetadata, RevisionRecord, new_revision_id, snapshot_hash, utc_now
+from app.persistence.revisions import HeadPointer, RevisionMetadata, RevisionRecord, new_revision_id, revision_hash, snapshot_hash, utc_now
 
 
 class StaleRevisionError(ValueError):
@@ -81,7 +81,8 @@ class ProjectStore:
         metadata = RevisionMetadata(project_id=project.id, revision_id=project.revision_id,
                                     revision_number=project.revision, parent_revision_id=parent_revision_id,
                                     created_at=self.clock(), origin=origin, actor=dict(actor),
-                                    operation=operation, summary=summary, snapshot_sha256=snapshot_hash(project))
+                                    operation=operation, summary=summary, snapshot_sha256="")
+        metadata = replace(metadata, snapshot_sha256=revision_hash(metadata, project))
         metadata.validate(project)
         return RevisionRecord(metadata, project_to_dict(project))
 
@@ -146,7 +147,7 @@ class ProjectStore:
             record = self._load_revision_record(directory, head.revision_id)
             project = project_from_dict(record.snapshot)
             self._validate_reachable_chain(directory, record)
-            if record.metadata.snapshot_sha256 != head.snapshot_sha256:
+            if snapshot_hash(record.snapshot) != head.snapshot_sha256:
                 raise ValidationError("HEAD and revision snapshot hashes differ")
             head.validate(project)
             return project

@@ -29,7 +29,11 @@ flowchart TD
 - **Revision Store:** new projects use `projects/{id}/head.json` plus immutable
   full snapshots in `revisions/`. Legacy flat v1 files are migrated in memory
   and promoted only on the first successful mutation; the original is retained
-  as `legacy-v1.json`.
+  as `legacy-v1.json`. Each revision carries a deterministic UTF-8 integrity
+  digest over its immutable chain and audit metadata and canonical snapshot; validation
+  runs before reachable-parent chain walking. This is tamper detection, not a
+  cryptographic signature against an attacker who can rewrite both record and
+  digest.
 - **REST Adapter:** provides browser-facing project, media, editing, render,
   and silence endpoints without duplicating domain rules.
 - **MCP Adapter:** exposes the same service through Streamable HTTP. It returns

@@ -9,6 +9,7 @@ from app.domain.operations import new_project
 from app.domain.operations import register_asset, split_clip
 from app.media.probe import probe_media
 from app.persistence.project_store import ProjectStore
+from app.persistence.revisions import RevisionMetadata, revision_hash
 from app.services.projects import ProjectService
 
 
@@ -54,11 +55,19 @@ def _migrated_linear_history(tmp_path):
     return store, second.id
 
 
-def _rewrite_head_revision(directory, mutate):
+def _resign_record(record):
+    metadata = RevisionMetadata(**record["metadata"])
+    snapshot = project_from_dict(record["snapshot"])
+    record["metadata"]["snapshot_sha256"] = revision_hash(metadata, snapshot)
+
+
+def _rewrite_head_revision(directory, mutate, resign=False):
     head = json.loads((directory / "head.json").read_text())
     path = directory / "revisions" / f"{head['revision_id']}.json"
     record = json.loads(path.read_text())
     mutate(record, directory)
+    if resign:
+        _resign_record(record)
     path.write_text(json.dumps(record))
 
 
@@ -125,6 +134,41 @@ def test_fresh_history_validates_as_a_linear_chain(tmp_path):
     assert store.load(project_id).revision == 2
 
 
+def test_tampered_normal_revision_cannot_become_a_migration_root(tmp_path):
+    store, project_id = _fresh_linear_history(tmp_path)
+    directory = tmp_path / project_id
+    paths = _record_paths(directory)
+    path = paths[1]
+    record = json.loads(path.read_text())
+    record["metadata"]["parent_revision_id"] = None
+    record["metadata"]["operation"] = "migration"
+    path.write_text(json.dumps(record))
+
+    with pytest.raises(ValidationError, match="integrity"):
+        store.load(project_id)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("parent_revision_id", None),
+        ("operation", "tampered-operation"),
+        ("revision_id", "revision_tampered"),
+        ("revision_number", 999),
+        ("project_id", "project_tampered"),
+    ],
+)
+def test_revision_integrity_digest_binds_immutable_metadata(tmp_path, field, value):
+    store, project_id = _fresh_linear_history(tmp_path)
+    path = _record_paths(tmp_path / project_id)[1]
+    record = json.loads(path.read_text())
+    record["metadata"][field] = value
+    path.write_text(json.dumps(record))
+
+    with pytest.raises(ValidationError):
+        store.load(project_id)
+
+
 def test_migrated_history_allows_nonzero_baseline_and_consecutive_parents(tmp_path):
     store, project_id = _migrated_linear_history(tmp_path)
     records = _record_paths(tmp_path / project_id)
@@ -165,7 +209,7 @@ def test_corrupt_parent_chains_are_rejected(tmp_path, corruption):
             parent["metadata"]["parent_revision_id"] = revision_two
             paths[1].write_text(json.dumps(parent))
 
-    _rewrite_head_revision(directory, mutate)
+    _rewrite_head_revision(directory, mutate, resign=True)
     with pytest.raises(ValidationError):
         store.load(project_id)
 
@@ -193,6 +237,7 @@ def test_parent_from_another_project_is_rejected(tmp_path):
     paths = _record_paths(directory)
     head = json.loads(paths[2].read_text())
     head["metadata"]["parent_revision_id"] = other_revision_id
+    _resign_record(head)
     paths[2].write_text(json.dumps(head))
     with pytest.raises(ValidationError, match="another project"):
         store.load(project_id)
