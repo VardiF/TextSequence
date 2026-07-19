@@ -15,7 +15,7 @@ The MCP endpoint remains available without `OPENAI_API_KEY`.
 
 ## Available tools
 
-The current server exposes exactly these 11 tools:
+The current server exposes exactly these 14 tools:
 
 ### `list_projects()`
 
@@ -29,7 +29,8 @@ and `clip_count`.
 Returns the safe timeline projection: project metadata, tracks, stable clip
 IDs, deterministic clip ordinals, asset IDs and display names, integer
 `source_in_frame`, exclusive `source_out_frame`, duration, timeline start/end,
-and deterministic gap ordinals. It does not return source filesystem paths.
+deterministic gap ordinals, sorted markers, `content_end_frame`, and
+`display_end_frame`. It does not return source filesystem paths.
 
 ### `get_editor_context(editor_session_id)`
 
@@ -42,6 +43,22 @@ should use explicit `get_timeline` references instead.
 
 Possible errors include `EDITOR_CONTEXT_MISSING`, `PROJECT_NOT_FOUND`, and
 `INVALID_SELECTION`.
+
+### `add_marker(project_id, expected_revision, start_frame, name, end_frame=null, description="", type="generic", production={...})`
+
+Adds a server-generated point or exclusive range marker. The marker is
+absolute timeline metadata and creates exactly one revision.
+
+### `update_marker(project_id, marker_id, expected_revision, changes)`
+
+Applies a partial marker update. Omitted fields remain unchanged; supplying
+`end_frame: null` converts a range to a point. The marker ID cannot change,
+and an empty update returns `NO_CHANGES`.
+
+### `delete_marker(project_id, marker_id, expected_revision)`
+
+Deletes one marker and returns `deleted_marker_id` plus the authoritative
+timeline projection. Missing markers return `MARKER_NOT_FOUND`.
 
 ### `analyze_silence(project_id, minimum_silence_ms=700, noise_threshold_db=-35)`
 

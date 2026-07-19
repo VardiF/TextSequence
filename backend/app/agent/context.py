@@ -21,6 +21,7 @@ class EditorContext:
     active_project_id: str
     observed_project_revision: int
     selected_clip_id: Optional[str]
+    selected_marker_id: Optional[str]
     playhead_frame: int
     visible_track_id: Optional[str]
     captured_at: str
@@ -56,16 +57,21 @@ class EditorContextStore:
         if not isinstance(revision, int) or revision < 0 or not isinstance(playhead, int) or playhead < 0:
             raise EditorContextError("INVALID_ARGUMENT", "Revision and playhead_frame must be non-negative integers")
         selected = snapshot.get("selected_clip_id")
+        selected_marker = snapshot.get("selected_marker_id")
         visible_track = snapshot.get("visible_track_id")
         if selected is not None:
             self._validate_id(selected, "selected_clip_id")
             if not any(clip.id == selected for track in project.timeline.tracks for clip in track.clips):
                 raise EditorContextError("INVALID_SELECTION", "Selected clip does not exist in the current project")
+        if selected_marker is not None:
+            self._validate_id(selected_marker, "selected_marker_id")
+            if not any(marker.id == selected_marker for marker in project.timeline.markers):
+                raise EditorContextError("INVALID_SELECTION", "Selected marker does not exist in the current project")
         if visible_track is not None:
             self._validate_id(visible_track, "visible_track_id")
             if not any(track.id == visible_track for track in project.timeline.tracks):
                 raise EditorContextError("INVALID_ARGUMENT", "Visible track does not exist in the current project")
-        context = EditorContext(session_id, project_id, revision, selected, playhead, visible_track,
+        context = EditorContext(session_id, project_id, revision, selected, selected_marker, playhead, visible_track,
                                 datetime.now(timezone.utc).isoformat())
         with self._lock:
             self._contexts[session_id] = context
@@ -84,8 +90,13 @@ class EditorContextStore:
         selected_exists = context.selected_clip_id is None or any(
         clip.id == context.selected_clip_id for track in project.timeline.tracks for clip in track.clips
         )
+        selected_marker_exists = context.selected_marker_id is None or any(
+            marker.id == context.selected_marker_id for marker in project.timeline.markers
+        )
         if not selected_exists:
             raise EditorContextError("INVALID_SELECTION", "The selected clip no longer exists")
+        if not selected_marker_exists:
+            raise EditorContextError("INVALID_SELECTION", "The selected marker no longer exists")
         return {
             "editor_session_id": context.editor_session_id,
             "active_project_id": context.active_project_id,
@@ -93,6 +104,8 @@ class EditorContextStore:
             "current_project_revision": project.revision,
             "selected_clip_id": context.selected_clip_id,
             "selected_clip_exists": selected_exists,
+            "selected_marker_id": context.selected_marker_id,
+            "selected_marker_exists": selected_marker_exists,
             "playhead_frame": context.playhead_frame,
             "visible_track_id": context.visible_track_id,
             "captured_at": context.captured_at,

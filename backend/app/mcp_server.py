@@ -19,6 +19,8 @@ def _error(exc: Exception) -> dict[str, Any]:
     elif isinstance(exc, FileNotFoundError): code = "PROJECT_NOT_FOUND"
     elif isinstance(exc, SilenceAnalysisError): code = exc.code
     elif isinstance(exc, ValidationError) and "Clip does not exist" in str(exc): code = "CLIP_NOT_FOUND"
+    elif isinstance(exc, ValidationError) and "Marker does not exist" in str(exc): code = "MARKER_NOT_FOUND"
+    elif isinstance(exc, ValidationError) and "no changes" in str(exc).lower(): code = "NO_CHANGES"
     else: code = "INVALID_ARGUMENT"
     result = {"ok": False, "error": {"code": code, "message": str(exc)}}
     if isinstance(exc, StaleRevisionError) and exc.current_revision is not None:
@@ -97,6 +99,49 @@ def move_clip(project_id: str, clip_id: str, expected_revision: int, destination
 @mcp.tool()
 def trim_clip(project_id: str, clip_id: str, expected_revision: int, edge: str, frames_to_remove: int) -> dict[str, Any]:
     return _mutation(lambda *args: application.projects.trim_relative(*args, origin="mcp", actor={"type": "agent"}), project_id, clip_id, expected_revision, edge, frames_to_remove)
+
+
+@mcp.tool()
+def add_marker(project_id: str, expected_revision: int, start_frame: int, name: str,
+               end_frame: int | None = None, description: str = "", type: str = "generic",
+               production: dict[str, Any] | None = None) -> dict[str, Any]:
+    try:
+        before = application.projects.get(project_id)
+        result = application.projects.add_marker(project_id, expected_revision, start_frame, end_frame, name,
+                                                  description, type, production, origin="mcp", actor={"type": "agent"})
+        prior_ids = {marker.id for marker in before.timeline.markers}
+        marker_id = next(marker.id for marker in result.timeline.markers if marker.id not in prior_ids)
+        response = _mutation(lambda: result)
+        response["marker_id"] = marker_id
+        response["marker"] = next(marker for marker in application.projects.timeline(result.id)["markers"] if marker["id"] == marker_id)
+        return response
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool()
+def update_marker(project_id: str, marker_id: str, expected_revision: int, changes: dict[str, Any]) -> dict[str, Any]:
+    try:
+        result = application.projects.update_marker(project_id, expected_revision, marker_id, changes,
+                                                     origin="mcp", actor={"type": "agent"})
+        response = _mutation(lambda: result)
+        response["marker_id"] = marker_id
+        response["marker"] = next(marker for marker in application.projects.timeline(result.id)["markers"] if marker["id"] == marker_id)
+        return response
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool()
+def delete_marker(project_id: str, marker_id: str, expected_revision: int) -> dict[str, Any]:
+    try:
+        result = application.projects.delete_marker(project_id, expected_revision, marker_id,
+                                                     origin="mcp", actor={"type": "agent"})
+        response = _mutation(lambda: result)
+        response["deleted_marker_id"] = marker_id
+        return response
+    except Exception as exc:
+        return _error(exc)
 
 
 def _render(fn, project_id: str, expected_revision: int) -> dict[str, Any]:

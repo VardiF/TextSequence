@@ -2,12 +2,13 @@ import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import './styles.css';
 import { mapTimelineFrameToPlayback, TimelinePlaybackSample } from './playback';
+import { displayEndFrame, markerDisplayEnd, markerIsActive, markerPositionPercent, markerSeekFrame, TimelineMarker } from './markers';
 
 type FrameRate = { numerator: number; denominator: number };
 type Asset = { id: string; path: string; name: string; codec: string; width: number; height: number; fps: FrameRate; duration_frames: number };
 type Clip = { id: string; asset_id: string; source_in_frame: number; source_out_frame: number; timeline_start_frame: number };
 type Track = { id: string; name: string; clips: Clip[] };
-type Timeline = { id: string; name: string; external_refs: unknown[]; tracks: Track[]; markers: unknown[] };
+type Timeline = { id: string; name: string; external_refs: unknown[]; tracks: Track[]; markers: TimelineMarker[] };
 type Project = { schema_version: number; id: string; name: string; revision: number; revision_id: string; external_refs: unknown[]; fps: FrameRate | null; assets: Asset[]; timeline: Timeline };
 type TrimEdge = 'in' | 'out';
 type TrimPreview = { clipId: string; sourceInFrame: number; sourceOutFrame: number };
@@ -37,6 +38,18 @@ function App() {
   const [dragOver, setDragOver] = useState(false);
   const [error, setError] = useState('');
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
+  const [selectedMarkerId, setSelectedMarkerId] = useState<string | null>(null);
+  const [markerEditorOpen, setMarkerEditorOpen] = useState(false);
+  const [editingMarkerId, setEditingMarkerId] = useState<string | null>(null);
+  const [markerDraft, setMarkerDraftState] = useState({ name: '', type: 'generic', description: '', range: false, endFrame: '' });
+  const setMarkerDraft = (next: typeof markerDraft) => {
+    setMarkerDraftState(next);
+    if (selectedMarker && next.name === selectedMarker.name && next.type === selectedMarker.type) {
+      setEditingMarkerId(selectedMarker.id);
+      setMarkerEditorOpen(true);
+    }
+    return false;
+  };
   const [frame, setFrame] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [trimPreview, setTrimPreview] = useState<TrimPreview | null>(null);
@@ -77,6 +90,8 @@ function App() {
   const selectedClip = clips.find((clip) => clip.id === selectedClipId) ?? null;
   const fps = fpsValue(project);
   const timelineDuration = Math.max(1, ...clips.map((clip) => clip.timeline_start_frame + clipDuration(clip)));
+  const displayTimelineDuration = Math.max(1, displayEndFrame(timelineDuration, project?.timeline.markers ?? []));
+  const selectedMarker = project?.timeline.markers.find((marker) => marker.id === selectedMarkerId) ?? null;
   const playbackSample: TimelinePlaybackSample = project?.fps
     ? mapTimelineFrameToPlayback(clips, frame, project.fps)
     : { kind: 'gap', timeline_frame: frame };
@@ -123,10 +138,12 @@ function App() {
     };
   }, []);
 
-  const refresh = (next: Project, selection: string | null = selectedClipId) => {
+  const refresh = (next: Project, selection: string | null = selectedClipId, markerSelection: string | null = selectedMarkerId) => {
     stopTimelinePlayback();
     setProject(next);
     setSelectedClipId(selection && next.timeline.tracks[0]?.clips.some((clip) => clip.id === selection) ? selection : null);
+    setSelectedMarkerId(markerSelection && next.timeline.markers.some((marker) => marker.id === markerSelection) ? markerSelection : null);
+    if (markerSelection && !next.timeline.markers.some((marker) => marker.id === markerSelection)) setMarkerEditorOpen(false);
     setRenderedPreview(null);
     setPreviewMode('live');
     setExportedMedia(null);
@@ -225,7 +242,7 @@ function App() {
     else playTimeline();
   };
   const seek = (nextFrame: number) => {
-    const target = Math.max(0, Math.min(timelineDuration, Math.round(nextFrame)));
+    const target = Math.max(0, Math.min(displayTimelineDuration, Math.round(nextFrame)));
     if (playingRef.current && playbackClock.current) {
       playbackClock.current.startTime = performance.now();
       playbackClock.current.startFrame = target;
@@ -282,6 +299,17 @@ function App() {
     try { refresh(await api<Project>(`/projects/${project.id}/clips/${route}`, { method: 'POST', body: JSON.stringify({ ...body, expected_revision: project.revision }) }), selection); }
     catch (exception) { setError(String(exception)); }
   };
+  const mutateMarker = async (route: 'add' | 'update' | 'delete', body: Record<string, unknown>, markerSelection: string | null = selectedMarkerId) => {
+    if (!project) return;
+    try {
+      const response = await api<Project & { marker_id?: string; deleted_marker_id?: string }>(`/projects/${project.id}/markers/${route}`, {
+        method: 'POST', body: JSON.stringify({ ...body, expected_revision: project.revision }),
+      });
+      const nextMarkerId = response.marker_id ?? markerSelection;
+      refresh(response, null, nextMarkerId);
+      if (route === 'delete') setMarkerEditorOpen(false);
+    } catch (exception) { setError(String(exception)); }
+  };
   const split = () => {
     if (!selectedClip) { setError('Select a clip to edit.'); return; }
     if (!playheadInsideSelected) { setError('Move the playhead inside the selected clip.'); return; }
@@ -300,6 +328,40 @@ function App() {
     void mutate('trim', { clip_id: selectedClip.id, source_out_frame: selectedClip.source_in_frame + framesIntoClip }, selectedClip.id);
   };
   const remove = () => { if (selectedClip) void mutate('delete', { clip_id: selectedClip.id }, null); else setError('Select a clip to edit.'); };
+  const openMarkerDraft = () => {
+    setSelectedClipId(null);
+    setSelectedMarkerId(null);
+    setEditingMarkerId(null);
+    setMarkerDraft({ name: '', type: 'generic', description: '', range: false, endFrame: '' });
+    setMarkerEditorOpen(true);
+  };
+  const saveMarkerDraft = () => {
+    let endFrame: number | null = null;
+    if (markerDraft.range) endFrame = Number(markerDraft.endFrame);
+    if (!markerDraft.name.trim()) { setError('Marker name is required.'); return; }
+    if (markerDraft.range && (endFrame === null || !Number.isInteger(endFrame) || endFrame <= frame)) { setError('Range marker end must be an integer greater than its start.'); return; }
+    if (editingMarkerId) {
+      void mutateMarker('update', { marker_id: editingMarkerId, changes: { start_frame: selectedMarker?.start_frame ?? frame, end_frame: endFrame, name: markerDraft.name, type: markerDraft.type, description: markerDraft.description } }, editingMarkerId);
+    } else {
+      void mutateMarker('add', { start_frame: frame, end_frame: endFrame, name: markerDraft.name, type: markerDraft.type, description: markerDraft.description, production: { shot_ids: [], dialogue_line_ids: [], external_refs: [] } }, null);
+    }
+    setEditingMarkerId(null);
+    setMarkerEditorOpen(false);
+  };
+  const openSelectedMarkerEditor = () => {
+    if (!selectedMarker) return;
+    setEditingMarkerId(selectedMarker.id);
+    setMarkerDraft({ name: selectedMarker.name, type: selectedMarker.type, description: selectedMarker.description, range: selectedMarker.end_frame !== null, endFrame: selectedMarker.end_frame === null ? '' : String(selectedMarker.end_frame) });
+    setMarkerEditorOpen(true);
+  };
+  const updateSelectedMarker = (changes: Record<string, unknown>) => {
+    if (selectedMarker) void mutateMarker('update', { marker_id: selectedMarker.id, changes }, selectedMarker.id);
+  };
+  const moveSelectedMarkerToPlayhead = () => {
+    if (!selectedMarker) return;
+    const duration = selectedMarker.end_frame === null ? null : selectedMarker.end_frame - selectedMarker.start_frame;
+    updateSelectedMarker({ start_frame: frame, end_frame: duration === null ? null : frame + duration });
+  };
   const renderProject = async (kind: 'preview' | 'export') => {
     if (!project || renderState === 'rendering') return;
     setRenderState('rendering');
@@ -333,6 +395,7 @@ function App() {
         body: JSON.stringify({ editor_session_id: editorSessionId, message, editor_context: {
           editor_session_id: editorSessionId, project_id: project.id, observed_revision: project.revision,
           selected_clip_id: selectedClipId, playhead_frame: frame, visible_track_id: project.timeline.tracks[0]?.id ?? null,
+          selected_marker_id: selectedMarkerId,
         } }),
       });
       setChatMessages((current) => [...current, { role: 'assistant', text: response.message, actions: response.actions ?? [] }]);
@@ -426,7 +489,7 @@ function App() {
     event.preventDefault();
     const clipId = event.dataTransfer.getData('text/clip-id');
     const bounds = event.currentTarget.getBoundingClientRect();
-    const destination = Math.max(0, Math.round(((event.clientX - bounds.left) / bounds.width) * timelineDuration));
+    const destination = Math.max(0, Math.round(((event.clientX - bounds.left) / bounds.width) * displayTimelineDuration));
     if (clipId) void mutate('move', { clip_id: clipId, timeline_start_frame: destination }, clipId);
   };
   useEffect(() => {
@@ -434,14 +497,14 @@ function App() {
   }, [project?.id, project?.revision, frame, previewMode, renderedPreview?.url]);
 
   return <main>
-    <header><h1>TextSequence</h1><span>v0.2.0 · MCP-native NLE</span></header>
+    <header><h1>TextSequence</h1><span>v0.2.1 · MCP-native NLE</span></header>
     <section className="toolbar"><button onClick={create}>New project</button><button onClick={open}>Open latest</button><div className={`import-controls ${dragOver ? 'drag-over' : ''}`} onDragEnter={(event) => { event.preventDefault(); setDragOver(true); }} onDragOver={(event) => event.preventDefault()} onDragLeave={() => setDragOver(false)} onDrop={handleDrop}><button onClick={chooseFile} disabled={uploadBusy}>{uploadBusy ? 'Importing…' : 'Choose Video'}</button><input ref={fileInput} type="file" accept="video/*,.mp4,.mov,.m4v" hidden onChange={(event) => { void uploadFile(event.target.files?.[0]); event.currentTarget.value = ''; }} /><span>{selectedFile?.name ?? 'Drop a video here'}</span></div><button onClick={() => void renderProject('preview')} disabled={!project || renderState === 'rendering'}>{renderState === 'rendering' ? 'Rendering…' : 'Render Preview'}</button><button onClick={() => void renderProject('export')} disabled={!project || renderState === 'rendering'}>Export MP4</button></section>
-    <section className="connections"><h2>Agent connections</h2><div className="connection-row"><div><strong>TextSequence MCP</strong><span className="status ready">● {health?.mcp.status === 'running' ? 'Running' : 'Checking'}</span><p>{health?.mcp.transport ?? 'Streamable HTTP'}</p><p><strong>Available tools: {health?.mcp.tool_count ?? 11}</strong></p><code>{health?.mcp.endpoint ?? 'http://127.0.0.1:8000/mcp'}</code></div><button onClick={() => void navigator.clipboard?.writeText(health?.mcp.endpoint ?? 'http://127.0.0.1:8000/mcp')}>Copy MCP URL</button></div><div className="connection-row"><div><strong>Built-in assistant</strong><span className={`status ${health?.built_in_assistant.configured ? 'ready' : 'optional'}`}>● {health?.built_in_assistant.configured ? 'Ready' : 'Optional · Not configured'}</span><p>{health?.built_in_assistant.configured ? 'OpenAI Agents SDK' : 'Optional for core editing. Connect an external MCP agent or configure OPENAI_API_KEY.'}</p></div></div></section>
+    <section className="connections"><h2>Agent connections</h2><div className="connection-row"><div><strong>TextSequence MCP</strong><span className="status ready">● {health?.mcp.status === 'running' ? 'Running' : 'Checking'}</span><p>{health?.mcp.transport ?? 'Streamable HTTP'}</p><p><strong>Available tools: {health?.mcp.tool_count ?? 14}</strong></p><code>{health?.mcp.endpoint ?? 'http://127.0.0.1:8000/mcp'}</code></div><button onClick={() => void navigator.clipboard?.writeText(health?.mcp.endpoint ?? 'http://127.0.0.1:8000/mcp')}>Copy MCP URL</button></div><div className="connection-row"><div><strong>Built-in assistant</strong><span className={`status ${health?.built_in_assistant.configured ? 'ready' : 'optional'}`}>● {health?.built_in_assistant.configured ? 'Ready' : 'Optional · Not configured'}</span><p>{health?.built_in_assistant.configured ? 'OpenAI Agents SDK' : 'Optional for core editing. Connect an external MCP agent or configure OPENAI_API_KEY.'}</p></div></div></section>
     {error && <p className="error">{error}</p>}
-    {project && <><div className="preview-mode" aria-label="Preview mode"><strong>PREVIEW</strong><button className={previewMode === 'live' ? 'active' : ''} onClick={() => setPreviewMode('live')}>Live</button><button className={previewMode === 'rendered' ? 'active' : ''} onClick={() => setPreviewMode('rendered')} disabled={!renderedPreview || renderedPreview.revision !== project.revision}>Rendered</button><span>{previewMode === 'rendered' ? 'Rendered MP4 · linear timeline playback' : 'Source media · clip mapping playback'}</span></div><section className="editing-toolbar" aria-label="Editing actions"><div className="editing-heading"><strong>EDIT</strong><span>{selectedClip ? `Selected clip · ${selectedClip.id.slice(0, 12)}` : 'No clip selected'} · Playhead frame {frame}</span></div><div className="editing-actions"><button onClick={toggleTimelinePlayback} disabled={!clips.length}>{playing ? 'Pause' : 'Play'}</button><button onClick={split} disabled={!selectedClip || !playheadInsideSelected} title={editHint}>Split at Playhead</button><button onClick={trimStartToPlayhead} disabled={!selectedClip || !playheadInsideSelected} title={editHint}>Trim Start to Playhead</button><button onClick={trimEndToPlayhead} disabled={!selectedClip || !playheadInsideSelected} title={editHint}>Trim End to Playhead</button><button onClick={remove} disabled={!selectedClip} title={selectedClip ? 'Delete the selected clip' : 'Select a clip to edit.'}>Delete Selected</button></div><small className="editing-hint">{editHint}{fps ? ` · ${(frame / fps).toFixed(2)}s` : ''}</small></section></>}
+    {project && <><div className="preview-mode" aria-label="Preview mode"><strong>PREVIEW</strong><button className={previewMode === 'live' ? 'active' : ''} onClick={() => setPreviewMode('live')}>Live</button><button className={previewMode === 'rendered' ? 'active' : ''} onClick={() => setPreviewMode('rendered')} disabled={!renderedPreview || renderedPreview.revision !== project.revision}>Rendered</button><span>{previewMode === 'rendered' ? 'Rendered MP4 · linear timeline playback' : 'Source media · clip mapping playback'}</span></div><section className="editing-toolbar" aria-label="Editing actions"><div className="editing-heading"><strong>EDIT</strong><span>{selectedClip ? `Selected clip · ${selectedClip.id.slice(0, 12)}` : selectedMarker ? `Selected marker · ${selectedMarker.name}` : 'No selection'} · Playhead frame {frame}</span></div><div className="editing-actions"><button onClick={toggleTimelinePlayback} disabled={!clips.length}>{playing ? 'Pause' : 'Play'}</button><button onClick={split} disabled={!selectedClip || !playheadInsideSelected} title={editHint}>Split at Playhead</button><button onClick={trimStartToPlayhead} disabled={!selectedClip || !playheadInsideSelected} title={editHint}>Trim Start to Playhead</button><button onClick={trimEndToPlayhead} disabled={!selectedClip || !playheadInsideSelected} title={editHint}>Trim End to Playhead</button><button onClick={remove} disabled={!selectedClip} title={selectedClip ? 'Delete the selected clip' : 'Select a clip to edit.'}>Delete Selected</button><button onClick={openMarkerDraft}>Add Marker at Playhead</button></div><small className="editing-hint">{editHint}{fps ? ` · ${(frame / fps).toFixed(2)}s` : ''}</small>{markerEditorOpen && <div className="marker-editor"><label>Name <input value={markerDraft.name} onChange={(event) => setMarkerDraft({ ...markerDraft, name: event.target.value })} autoFocus /></label><label>Type <input value={markerDraft.type} onChange={(event) => setMarkerDraft({ ...markerDraft, type: event.target.value })} /></label><label>Description <input value={markerDraft.description} onChange={(event) => setMarkerDraft({ ...markerDraft, description: event.target.value })} /></label><label><input type="checkbox" checked={markerDraft.range} onChange={(event) => setMarkerDraft({ ...markerDraft, range: event.target.checked })} /> Range</label>{markerDraft.range && <label>End frame <input type="number" value={markerDraft.endFrame} onChange={(event) => setMarkerDraft({ ...markerDraft, endFrame: event.target.value })} /></label>}<button onClick={saveMarkerDraft}>Save marker</button><button onClick={() => setMarkerEditorOpen(false)}>Cancel</button></div>}</section></>}
     {!project && <section className={`empty-state ${dragOver ? 'drag-over' : ''}`} onDragEnter={(event) => { event.preventDefault(); setDragOver(true); }} onDragOver={(event) => event.preventDefault()} onDragLeave={() => setDragOver(false)} onDrop={handleDrop}><div className="empty-icon">TS</div><h2>Drop a video here to get started</h2><p>Choose a local video or drop one from Finder. Imported files stay on this machine.</p><div className="empty-actions"><button onClick={chooseFile} disabled={uploadBusy}>{uploadBusy ? 'Importing…' : 'Choose Video'}</button><button onClick={open}>Open latest</button></div></section>}
     {project && <section className="auto-edit"><div className="section-heading"><div><h3>Auto Edit · Silence Removal</h3><p>Analyze locally with FFmpeg, then apply one revision-checked batch edit.</p></div><span className="tool-badge">Deterministic</span></div><div className="auto-edit-controls"><label>Minimum silence <input type="number" min="1" value={silenceMinimumMs} onChange={(event) => setSilenceMinimumMs(Number(event.target.value))} /> ms</label><label>Keep padding <input type="number" min="0" value={silencePaddingMs} onChange={(event) => setSilencePaddingMs(Number(event.target.value))} /> ms</label><button onClick={() => void analyzeSilence()} disabled={silenceBusy}>{silenceBusy ? 'Analyzing…' : 'Analyze Silence'}</button><button onClick={() => void removeSilence()} disabled={silenceBusy || !silenceAnalysis || silenceAnalysis.summary.detected_silences === 0}>{silenceBusy ? 'Working…' : 'Remove Silence'}</button></div>{silenceAnalysis && <div className="auto-edit-result"><strong>Analysis</strong><span>{silenceAnalysis.summary.detected_silences} detected range(s) · {silenceAnalysis.summary.total_silence_frames} frames · minimum {silenceAnalysis.minimum_silence_ms} ms · threshold {silenceAnalysis.noise_threshold_db} dB</span></div>}{silenceRemoval && <div className="auto-edit-result success"><strong>Removal complete</strong><span>{silenceRemoval.removed_silences} range(s) removed · {silenceRemoval.removed_duration_ms} ms ({silenceRemoval.removed_frames} frames) · revision {silenceRemoval.revision}</span></div>}</section>}
-    {project && <><h2>{project.name}</h2><details className="advanced-import"><summary>Advanced: import by local path</summary><div><input value={path} onChange={(event) => setPath(event.target.value)} placeholder="/path/to/video.mp4" /><button onClick={importAsset} disabled={!path || uploadBusy}>Import Path</button><p>Path imports reference an external local file without copying it.</p></div></details>{!asset && <section className={`media-import-area ${dragOver ? 'drag-over' : ''}`} onDragEnter={(event) => { event.preventDefault(); setDragOver(true); }} onDragOver={(event) => event.preventDefault()} onDragLeave={() => setDragOver(false)} onDrop={handleDrop}><strong>Drop a video here</strong><span>or use Choose Video above · Imported files stay on this machine.</span></section>}<section className="workspace"><div className="preview"><div className="preview-label">{previewMode === 'rendered' && renderedPreview?.revision === project.revision ? 'RENDERED TIMELINE PREVIEW' : 'SOURCE PREVIEW'}</div>{asset ? <video ref={video} src={previewMode === 'rendered' && renderedPreview?.revision === project.revision ? renderedPreview.url : `/api/projects/${project.id}/assets/${asset.id}/media`} /> : <p>Import a local video to begin.</p>}{exportedMedia && <a className="export-link" href={exportedMedia.url} target="_blank" rel="noreferrer">Open exported MP4</a>}</div><aside><h3>Project JSON</h3><pre>{JSON.stringify(project, null, 2)}</pre></aside></section><section className="timeline"><div className="track-label">V1</div><div className="track" onClick={(event) => { const bounds = event.currentTarget.getBoundingClientRect(); seek(((event.clientX - bounds.left) / bounds.width) * timelineDuration); }} onDragOver={(event) => event.preventDefault()} onDrop={dropClip}>{clips.map((clip) => { const trim = trimPreview?.clipId === clip.id ? trimPreview : null; const move = movePreview?.clipId === clip.id ? movePreview : null; const sourceIn = trim ? trim.sourceInFrame : clip.source_in_frame; const sourceOut = trim ? trim.sourceOutFrame : clip.source_out_frame; const start = move ? move.timelineStartFrame : clip.timeline_start_frame; return <div key={clip.id} className={`clip ${clip.id === selectedClipId ? 'selected' : ''}`} draggable={false} onMouseDown={(event) => beginMove(event, clip)} onClick={(event) => { event.stopPropagation(); const bounds = (event.currentTarget.parentElement as HTMLElement).getBoundingClientRect(); seek(((event.clientX - bounds.left) / bounds.width) * timelineDuration); setSelectedClipId(clip.id); setError(''); }} style={{ left: `${start / timelineDuration * 100}%`, width: `${(sourceOut - sourceIn) / timelineDuration * 100}%` }}><span className="trim-handle trim-handle-in" onMouseDown={(event) => beginTrim(event, clip, 'in')} /><span className="clip-label">{asset?.name}</span><span className="trim-handle trim-handle-out" onMouseDown={(event) => beginTrim(event, clip, 'out')} /></div>; })}<div className="playhead" style={{ left: `${frame / timelineDuration * 100}%` }} /></div><div className="timeline-meta">Frame {frame} / {timelineDuration} · {project.fps ? `${project.fps.numerator}/${project.fps.denominator} fps` : 'No media'}{selectedClip ? ` · Selected ${selectedClip.id}` : ''}</div></section><section className="agent-panel"><div className="agent-heading"><h3>Built-in assistant</h3><span>{chatSending ? 'Processing…' : health?.built_in_assistant.configured ? 'Optional OpenAI integration' : 'Not configured'}</span></div>{!health?.built_in_assistant.configured ? <p className="agent-empty">Built-in assistant not configured. Connect an external MCP agent to TextSequence, or set OPENAI_API_KEY to enable this optional assistant.</p> : <><div className="agent-messages">{chatMessages.length === 0 && <p className="agent-empty">Ask the assistant to inspect or edit the current timeline.</p>}{chatMessages.map((item, index) => <article key={`${item.role}-${index}`} className={`agent-message ${item.role}`}><strong>{item.role === 'user' ? 'You' : 'Assistant'}</strong><p>{item.text}</p>{item.actions?.map((action, actionIndex) => <div className="agent-action" key={`${action.tool}-${actionIndex}`}>✓ {action.summary}</div>)}</article>)}</div><div className="agent-input"><input value={chatInput} disabled={chatSending} placeholder="Ask: Split this here" onChange={(event) => setChatInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void sendChat(); }} /><button onClick={() => void sendChat()} disabled={chatSending || !chatInput.trim()}>Send</button></div></>}</section></>}
+    {project && <><h2>{project.name}</h2><details className="advanced-import"><summary>Advanced: import by local path</summary><div><input value={path} onChange={(event) => setPath(event.target.value)} placeholder="/path/to/video.mp4" /><button onClick={importAsset} disabled={!path || uploadBusy}>Import Path</button><p>Path imports reference an external local file without copying it.</p></div></details>{!asset && <section className={`media-import-area ${dragOver ? 'drag-over' : ''}`} onDragEnter={(event) => { event.preventDefault(); setDragOver(true); }} onDragOver={(event) => event.preventDefault()} onDragLeave={() => setDragOver(false)} onDrop={handleDrop}><strong>Drop a video here</strong><span>or use Choose Video above · Imported files stay on this machine.</span></section>}<section className="workspace"><div className="preview"><div className="preview-label">{previewMode === 'rendered' && renderedPreview?.revision === project.revision ? 'RENDERED TIMELINE PREVIEW' : 'SOURCE PREVIEW'}</div>{asset ? <video ref={video} src={previewMode === 'rendered' && renderedPreview?.revision === project.revision ? renderedPreview.url : `/api/projects/${project.id}/assets/${asset.id}/media`} /> : <p>Import a local video to begin.</p>}{exportedMedia && <a className="export-link" href={exportedMedia.url} target="_blank" rel="noreferrer">Open exported MP4</a>}</div><aside><h3>Project JSON</h3><pre>{JSON.stringify(project, null, 2)}</pre></aside></section><section className="timeline"><div className="track-label marker-track-label">MARKERS</div><div className="marker-track" style={{ '--marker-duration': `${displayTimelineDuration}` } as React.CSSProperties}>{project.timeline.markers.map((marker) => <button key={marker.id} className={`timeline-marker ${marker.end_frame === null ? 'point' : 'range'} ${marker.id === selectedMarkerId ? 'selected' : ''} ${markerIsActive(marker, frame) ? 'active' : ''}`} onClick={(event) => { event.stopPropagation(); setSelectedMarkerId(marker.id); setSelectedClipId(null); setMarkerEditorOpen(false); seek(markerSeekFrame(marker)); }} style={{ left: `${markerPositionPercent(marker, displayTimelineDuration)}%`, width: `${marker.end_frame === null ? 3 : Math.max(1, (markerDisplayEnd(marker) - marker.start_frame) / displayTimelineDuration * 100)}%` }} title={`${marker.name} · frame ${marker.start_frame}`}>{marker.end_frame === null ? '●' : marker.name}</button>)}</div><div className="marker-controls">{selectedMarker && <><strong>{selectedMarker.name}</strong><button onClick={() => setMarkerDraft({ name: selectedMarker.name, type: selectedMarker.type, description: selectedMarker.description, range: selectedMarker.end_frame !== null, endFrame: selectedMarker.end_frame === null ? '' : String(selectedMarker.end_frame) }) || setMarkerEditorOpen(true)}>Edit marker</button><button onClick={moveSelectedMarkerToPlayhead}>Move to Playhead</button><button onClick={() => void mutateMarker('delete', { marker_id: selectedMarker.id }, selectedMarker.id)}>Delete marker</button></>}</div><div className="track-label">V1</div><div className="track" onClick={(event) => { const bounds = event.currentTarget.getBoundingClientRect(); seek(((event.clientX - bounds.left) / bounds.width) * displayTimelineDuration); }} onDragOver={(event) => event.preventDefault()} onDrop={dropClip}>{clips.map((clip) => { const trim = trimPreview?.clipId === clip.id ? trimPreview : null; const move = movePreview?.clipId === clip.id ? movePreview : null; const sourceIn = trim ? trim.sourceInFrame : clip.source_in_frame; const sourceOut = trim ? trim.sourceOutFrame : clip.source_out_frame; const start = move ? move.timelineStartFrame : clip.timeline_start_frame; return <div key={clip.id} className={`clip ${clip.id === selectedClipId ? 'selected' : ''}`} draggable={false} onMouseDown={(event) => beginMove(event, clip)} onClick={(event) => { event.stopPropagation(); const bounds = (event.currentTarget.parentElement as HTMLElement).getBoundingClientRect(); seek(((event.clientX - bounds.left) / bounds.width) * displayTimelineDuration); setSelectedClipId(clip.id); setSelectedMarkerId(null); setError(''); }} style={{ left: `${start / displayTimelineDuration * 100}%`, width: `${(sourceOut - sourceIn) / displayTimelineDuration * 100}%` }}><span className="trim-handle trim-handle-in" onMouseDown={(event) => beginTrim(event, clip, 'in')} /><span className="clip-label">{asset?.name}</span><span className="trim-handle trim-handle-out" onMouseDown={(event) => beginTrim(event, clip, 'out')} /></div>; })}<div className="playhead" style={{ left: `${frame / displayTimelineDuration * 100}%` }} /></div><div className="timeline-meta">Frame {frame} / {timelineDuration} · {project.fps ? `${project.fps.numerator}/${project.fps.denominator} fps` : 'No media'}{selectedClip ? ` · Selected ${selectedClip.id}` : selectedMarker ? ` · Marker ${selectedMarker.name}` : ''}</div></section><section className="agent-panel"><div className="agent-heading"><h3>Built-in assistant</h3><span>{chatSending ? 'Processing…' : health?.built_in_assistant.configured ? 'Optional OpenAI integration' : 'Not configured'}</span></div>{!health?.built_in_assistant.configured ? <p className="agent-empty">Built-in assistant not configured. Connect an external MCP agent to TextSequence, or set OPENAI_API_KEY to enable this optional assistant.</p> : <><div className="agent-messages">{chatMessages.length === 0 && <p className="agent-empty">Ask the assistant to inspect or edit the current timeline.</p>}{chatMessages.map((item, index) => <article key={`${item.role}-${index}`} className={`agent-message ${item.role}`}><strong>{item.role === 'user' ? 'You' : 'Assistant'}</strong><p>{item.text}</p>{item.actions?.map((action, actionIndex) => <div className="agent-action" key={`${action.tool}-${actionIndex}`}>✓ {action.summary}</div>)}</article>)}</div><div className="agent-input"><input value={chatInput} disabled={chatSending} placeholder="Ask: Split this here" onChange={(event) => setChatInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void sendChat(); }} /><button onClick={() => void sendChat()} disabled={chatSending || !chatInput.trim()}>Send</button></div></>}</section></>}
   </main>;
 }
 

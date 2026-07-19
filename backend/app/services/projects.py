@@ -8,10 +8,10 @@ from threading import Lock, RLock
 from typing import Optional
 from uuid import uuid4
 
-from app.domain.models import ValidationError
+from app.domain.models import Marker, ValidationError, marker_production_from_dict
 from app.domain.silence import SourceRemovalRange, apply_silence_removals
 from app.audio.silence import AssetSilenceAnalysis, SilenceAnalysisError, analyze_asset, milliseconds_to_frames, silence_dict, validate_parameters
-from app.domain.operations import delete_clip, move_clip, new_project, register_asset, split_clip, trim_clip
+from app.domain.operations import add_marker, delete_clip, delete_marker, move_clip, new_marker_id, new_project, register_asset, split_clip, trim_clip, update_marker
 from app.domain.models import project_to_dict
 from app.media.probe import probe_media
 from app.persistence.project_store import ProjectStore, StaleRevisionError
@@ -185,6 +185,26 @@ class ProjectService:
     def delete(self, project_id, clip_id, expected_revision, origin="rest", actor=None): return self._mutate(project_id, expected_revision, delete_clip, clip_id, origin=origin, actor=actor, operation_name="delete_clip", summary="Delete clip")
     def move(self, project_id, clip_id, timeline_start_frame, expected_revision, origin="rest", actor=None): return self._mutate(project_id, expected_revision, move_clip, clip_id, timeline_start_frame, origin=origin, actor=actor, operation_name="move_clip", summary="Move clip")
     def trim(self, project_id, clip_id, expected_revision, source_in_frame=None, source_out_frame=None, origin="rest", actor=None): return self._mutate(project_id, expected_revision, trim_clip, clip_id, source_in_frame, source_out_frame, origin=origin, actor=actor, operation_name="trim_clip", summary="Trim clip")
+
+    def add_marker(self, project_id: str, expected_revision: int, start_frame: int, end_frame=None,
+                   name: str = "", description: str = "", marker_type: str = "generic", production=None,
+                   origin="rest", actor=None):
+        marker = Marker(new_marker_id(), start_frame, end_frame, name, description, marker_type,
+                        marker_production_from_dict(production))
+        return self._mutate(project_id, expected_revision, add_marker, marker, origin=origin, actor=actor,
+                            operation_name="add_marker", summary="Add timeline marker")
+
+    def update_marker(self, project_id: str, expected_revision: int, marker_id: str, changes: dict,
+                      origin="rest", actor=None):
+        normalized = dict(changes)
+        if "production" in normalized:
+            normalized["production"] = marker_production_from_dict(normalized["production"])
+        return self._mutate(project_id, expected_revision, update_marker, marker_id, normalized,
+                            origin=origin, actor=actor, operation_name="update_marker", summary="Update timeline marker")
+
+    def delete_marker(self, project_id: str, expected_revision: int, marker_id: str, origin="rest", actor=None):
+        return self._mutate(project_id, expected_revision, delete_marker, marker_id,
+                            origin=origin, actor=actor, operation_name="delete_marker", summary="Delete timeline marker")
 
     def trim_relative(self, project_id, clip_id, expected_revision, edge, frames_to_remove, origin="rest", actor=None):
         if edge not in ("start", "end") or not isinstance(frames_to_remove, int) or frames_to_remove <= 0:

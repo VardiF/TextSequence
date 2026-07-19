@@ -16,3 +16,5 @@ runtime/
 *.mp4
 *.mov
 *.m4v
+
+projects_invalid_backup/

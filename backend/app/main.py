@@ -14,7 +14,7 @@ async def lifespan(_app):
     async with mcp.session_manager.run():
         yield
 
-app = FastAPI(title="TextSequence", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="TextSequence", version="0.2.1", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"], allow_methods=["*"], allow_headers=["*"])
 app.include_router(router)
 app.mount("/mcp", mcp_app)

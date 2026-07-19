@@ -59,12 +59,23 @@ class ClipProductionMetadata:
     external_refs: list[ExternalReference] = field(default_factory=list)
 
 
+@dataclass
+class MarkerProductionMetadata:
+    shot_ids: list[str] = field(default_factory=list)
+    dialogue_line_ids: list[str] = field(default_factory=list)
+    external_refs: list[ExternalReference] = field(default_factory=list)
+
+
 def empty_asset_production() -> AssetProductionMetadata:
     return AssetProductionMetadata()
 
 
 def empty_clip_production() -> ClipProductionMetadata:
     return ClipProductionMetadata()
+
+
+def empty_marker_production() -> MarkerProductionMetadata:
+    return MarkerProductionMetadata()
 
 
 @dataclass
@@ -109,13 +120,53 @@ class Track:
 
 
 @dataclass
+class Marker:
+    id: str
+    start_frame: int
+    end_frame: Optional[int] = None
+    name: str = ""
+    description: str = ""
+    type: str = "generic"
+    production: MarkerProductionMetadata = field(default_factory=empty_marker_production)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.id, str) or not re.fullmatch(r"marker_[0-9a-f]{32}", self.id):
+            raise ValidationError("Invalid marker id")
+        if isinstance(self.start_frame, bool) or not isinstance(self.start_frame, int) or self.start_frame < 0:
+            raise ValidationError("Marker start_frame must be a non-negative integer")
+        if self.end_frame is not None:
+            if isinstance(self.end_frame, bool) or not isinstance(self.end_frame, int):
+                raise ValidationError("Marker end_frame must be an integer or null")
+            if self.end_frame <= self.start_frame:
+                raise ValidationError("Marker end_frame must be greater than start_frame")
+        if not isinstance(self.name, str):
+            raise ValidationError("Marker name must be a string")
+        self.name = self.name.strip()
+        if not 1 <= len(self.name) <= 160:
+            raise ValidationError("Marker name must be 1-160 characters")
+        if not isinstance(self.description, str) or len(self.description) > 2000:
+            raise ValidationError("Marker description must be at most 2000 characters")
+        if not isinstance(self.type, str) or not re.fullmatch(r"[a-z][a-z0-9_.-]{0,63}", self.type):
+            raise ValidationError("Invalid marker type")
+        if not isinstance(self.production, MarkerProductionMetadata):
+            raise ValidationError("Invalid marker production metadata")
+
+
+def marker_sort_key(marker: Marker | dict[str, Any]) -> tuple[int, int, str]:
+    if isinstance(marker, Marker):
+        end_frame = marker.end_frame
+        return marker.start_frame, marker.start_frame if end_frame is None else end_frame, marker.id
+    end_frame = marker.get("end_frame")
+    return marker["start_frame"], marker["start_frame"] if end_frame is None else end_frame, marker["id"]
+
+
+@dataclass
 class Timeline:
     id: str
     name: str = "Main timeline"
     external_refs: list[ExternalReference] = field(default_factory=list)
     tracks: list[Track] = field(default_factory=list)
-    # Reserved for a later release. It must remain an empty canonical collection in v0.2.0.
-    markers: list[dict[str, Any]] = field(default_factory=list)
+    markers: list[Marker] = field(default_factory=list)
 
 
 @dataclass
@@ -155,12 +206,16 @@ class Project:
         validate_revision_id(self.revision_id)
         if self.revision < 0:
             raise ValidationError("Revision cannot be negative")
-        if self.timeline.markers:
-            raise ValidationError("Markers are reserved and must be empty in schema v2")
         ids: list[str] = [self.id, self.timeline.id]
         ids.extend(a.id for a in self.assets)
         ids.extend(t.id for t in self.tracks)
         ids.extend(c.id for t in self.tracks for c in t.clips)
+        for marker in self.timeline.markers:
+            if not isinstance(marker, Marker):
+                raise ValidationError("Timeline markers must be typed Marker values")
+            marker.__post_init__()
+            _validate_marker_production(marker.production)
+        ids.extend(marker.id for marker in self.timeline.markers)
         if any(not item for item in ids) or len(ids) != len(set(ids)):
             raise ValidationError("All project entities need unique opaque IDs")
         if self.fps is None and self.assets:
@@ -191,12 +246,19 @@ class Project:
 def project_to_dict(project: Project) -> dict[str, Any]:
     project.validate()
     data = asdict(project)
+    data["timeline"]["markers"] = sorted(data["timeline"]["markers"], key=marker_sort_key)
     # `tracks` is intentionally absent: timeline.tracks is the only canonical collection.
     return data
 
 
 def _external_refs(items: list[dict[str, Any]] | None) -> list[ExternalReference]:
-    return [ExternalReference(**item) for item in (items or [])]
+    references = []
+    for item in (items or []):
+        if not isinstance(item, dict):
+            raise ValidationError("External references must be objects")
+        _reject_unknown(item, {"system", "id", "kind"}, "external_refs")
+        references.append(ExternalReference(**item))
+    return references
 
 
 def _asset_production(data: dict[str, Any] | None) -> AssetProductionMetadata:
@@ -218,6 +280,36 @@ def _clip_production(data: dict[str, Any] | None) -> ClipProductionMetadata:
         dialogue_line_ids=list(data.get("dialogue_line_ids", [])),
         external_refs=_external_refs(data.get("external_refs")),
     )
+
+
+def _marker_production(data: dict[str, Any] | None) -> MarkerProductionMetadata:
+    data = data or {}
+    if not isinstance(data, dict):
+        raise ValidationError("Marker production must be an object")
+    _reject_unknown(data, {"shot_ids", "dialogue_line_ids", "external_refs"}, "marker.production")
+    return MarkerProductionMetadata(
+        shot_ids=list(data.get("shot_ids", [])),
+        dialogue_line_ids=list(data.get("dialogue_line_ids", [])),
+        external_refs=_external_refs(data.get("external_refs")),
+    )
+
+
+def _validate_marker_production(production: MarkerProductionMetadata) -> None:
+    for field_name, values in (("shot_ids", production.shot_ids), ("dialogue_line_ids", production.dialogue_line_ids)):
+        if any(not isinstance(value, str) or not value for value in values) or len(values) != len(set(values)):
+            raise ValidationError(f"Marker production {field_name} must contain unique non-empty strings")
+    external_keys = [(item.system, item.id, item.kind) for item in production.external_refs]
+    if len(external_keys) != len(set(external_keys)):
+        raise ValidationError("Marker production external_refs must be unique")
+
+
+def marker_production_from_dict(data: dict[str, Any] | MarkerProductionMetadata | None) -> MarkerProductionMetadata:
+    if isinstance(data, MarkerProductionMetadata):
+        production = data
+    else:
+        production = _marker_production(data)
+    _validate_marker_production(production)
+    return production
 
 
 def _reject_unknown(data: dict[str, Any], allowed: set[str], path: str) -> None:
@@ -248,7 +340,18 @@ def _project_from_v2(data: dict[str, Any]) -> Project:
             _reject_unknown(clip_data, {"id", "asset_id", "source_in_frame", "source_out_frame", "timeline_start_frame", "production"}, f"project.timeline.tracks[{track_index}].clips[{clip_index}]")
             clips.append(Clip(**{**clip_data, "production": _clip_production(clip_data.get("production"))}))
         tracks.append(Track(id=item["id"], name=item["name"], kind=item.get("kind", "video"), clips=clips))
-    timeline = Timeline(id=timeline_data["id"], name=timeline_data.get("name", "Main timeline"), external_refs=_external_refs(timeline_data.get("external_refs")), tracks=tracks, markers=list(timeline_data.get("markers", [])))
+    markers = []
+    for marker_index, marker_data in enumerate(timeline_data.get("markers", [])):
+        if not isinstance(marker_data, dict):
+            raise ValidationError(f"Invalid marker at project.timeline.markers[{marker_index}]")
+        _reject_unknown(marker_data, {"id", "start_frame", "end_frame", "name", "description", "type", "production"}, f"project.timeline.markers[{marker_index}]")
+        required = {"id", "start_frame", "name"} - set(marker_data)
+        if required:
+            raise ValidationError(f"Missing marker field: {sorted(required)[0]}")
+        production = _marker_production(marker_data.get("production"))
+        _validate_marker_production(production)
+        markers.append(Marker(**{**marker_data, "production": production}))
+    timeline = Timeline(id=timeline_data["id"], name=timeline_data.get("name", "Main timeline"), external_refs=_external_refs(timeline_data.get("external_refs")), tracks=tracks, markers=sorted(markers, key=marker_sort_key))
     if "timeline_id" in data and data["timeline_id"] != timeline.id:
         raise ValidationError("Project timeline_id does not match timeline.id")
     if "tracks" in data and data["tracks"] != timeline_data.get("tracks"):
