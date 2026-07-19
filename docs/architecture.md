@@ -43,7 +43,8 @@ flowchart TD
 - **MCP Adapter:** exposes the same service through Streamable HTTP. It returns
   safe projections and never exposes source paths through timeline inspection.
   v0.3.0 adds stateless `prepare_transaction` and `commit_transaction` tools;
-  v0.2.3 added the typed `query_timeline` and `diff_revisions` tools; eight
+  v0.3.1 adds forward-only `restore_revision`; v0.2.3 added the typed
+  `query_timeline` and `diff_revisions` tools; eight
   read-only Resources and REST reads reuse the same safe read boundaries.
 - **Read Surface:** project, timeline, asset, clip, marker, and revision
   projections are transport-neutral. Revision reads walk only the chain
@@ -53,6 +54,13 @@ flowchart TD
   HEAD-reachable history load, then calls a pure explicit-field comparator. It
   never compares raw snapshot dictionaries, mutates persistence, or emits
   source locations.
+- **Forward-only Restore:** resolves the target only from the same validated
+  HEAD-reachable history load used for revision reads and diff. It deep-copies
+  the authenticated target snapshot, preserves project/timeline/entity IDs and
+  internal source paths, replaces only revision identity, and commits one new
+  child of the current HEAD with direct `restored_from_revision_id` provenance.
+  `diff_revisions` is the safe preview; restore requires the exact current
+  revision and revision ID and never rewrites history or checks media.
 - **Transactions:** preparation parses a strict seven-operation union, resolves
   stable IDs and earlier `result_ref` bindings, allocates deterministic IDs,
   and runs the domain operations on a deep copy. It returns the same pure

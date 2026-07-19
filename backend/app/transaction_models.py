@@ -5,7 +5,7 @@ from typing import Annotated, Any, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, model_serializer, model_validator
 
-from app.revision_diff_models import RevisionChanges, RevisionDiffSummary
+from app.revision_diff_models import ProjectStateDiff, RevisionChanges, RevisionDiffSummary
 
 
 class _StrictModel(BaseModel):
@@ -192,11 +192,6 @@ class PreparedTransaction(_StrictModel):
 class CommitTransactionRequest(_StrictModel):
     transaction_hash: Annotated[StrictStr, Field(pattern=r"[0-9a-f]{64}")]
     prepared_transaction: PreparedTransaction
-
-
-class ProjectStateDiff(_StrictModel):
-    summary: RevisionDiffSummary
-    changes: RevisionChanges
 
 
 class OperationResult(_StrictModel):

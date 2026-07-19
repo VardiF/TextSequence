@@ -16,13 +16,15 @@ from app.persistence.project_store import RevisionNotFoundError
 from app.revision_diff_models import RevisionDiffErrorOutput, RevisionDiffResult
 from app.services.revision_diff import RevisionDiffError
 from app.services.transactions import TransactionError
+from app.services.restore import RestoreError
 from app.transaction_models import CommitTransactionOutput, PrepareTransactionOutput, TransactionErrorOutput
+from app.restore_models import RestoreErrorOutput, RestoreRevisionResult
 
 mcp = FastMCP("TextSequence", instructions="Local-first TextSequence project collaboration.", streamable_http_path="/")
 
 
 def _error(exc: Exception) -> dict[str, Any]:
-    if isinstance(exc, TransactionError): code = exc.code
+    if isinstance(exc, (TransactionError, RestoreError)): code = exc.code
     elif isinstance(exc, StaleRevisionError): code = "STALE_REVISION"
     elif isinstance(exc, TimelineConflictError): code = "TIMELINE_CONFLICT"
     elif isinstance(exc, RevisionNotFoundError): code = "REVISION_NOT_FOUND"
@@ -53,7 +55,7 @@ def _error(exc: Exception) -> dict[str, Any]:
     result = {"ok": False, "error": {"code": code, "message": messages.get(code, "Invalid argument")}}
     if isinstance(exc, StaleRevisionError) and exc.current_revision is not None:
         result["error"]["current_revision"] = exc.current_revision
-    if isinstance(exc, TransactionError):
+    if isinstance(exc, (TransactionError, RestoreError)):
         for key in ("operation_index", "operation", "cause_code", "current_revision", "current_revision_id"):
             value = getattr(exc, key, None)
             if value is not None:
@@ -236,6 +238,23 @@ def commit_transaction(project_id: str, transaction_hash: str, prepared_transact
             {"transaction_hash": transaction_hash, "prepared_transaction": prepared_transaction},
             origin="mcp", actor={"type": "agent"},
         ).model_dump(mode="json")
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False),
+    structured_output=True,
+)
+def restore_revision(project_id: str, target_revision_id: str, expected_revision: int,
+                     expected_revision_id: str) -> RestoreRevisionResult | RestoreErrorOutput:
+    try:
+        result = application.projects.restore_revision(
+            project_id, target_revision_id,
+            {"expected_revision": expected_revision, "expected_revision_id": expected_revision_id},
+            origin="mcp", actor={"type": "agent"},
+        )
+        return result.model_dump(mode="json")
     except Exception as exc:
         return _error(exc)
 

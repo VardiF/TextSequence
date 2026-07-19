@@ -25,6 +25,7 @@ from app.services.revision_diff import (RevisionDiffError, RevisionDiffIntegrity
 from app.revision_diff_models import RevisionDiffMetadata, RevisionDiffResult
 from app.services.projections import revision_metadata_projection
 from app.services.transactions import TransactionService
+from app.services.restore import RestoreService
 
 
 class ProjectService:
@@ -36,6 +37,7 @@ class ProjectService:
         self._locks: dict[str, RLock] = {}
         self._locks_guard = Lock()
         self.transactions = TransactionService(self)
+        self.restore = RestoreService(self)
 
     def _project_lock(self, project_id: str) -> RLock:
         self.store.path_for(project_id)
@@ -59,6 +61,10 @@ class ProjectService:
 
     def commit_transaction(self, project_id: str, request, *, origin="rest", actor=None):
         return self.transactions.commit(project_id, request, origin=origin, actor=actor or {"type": "human"})
+
+    def restore_revision(self, project_id: str, target_revision_id: str, request, *, origin="rest", actor=None):
+        return self.restore.restore(project_id, target_revision_id, request, origin=origin,
+                                    actor=actor or {"type": "human"})
 
     def revision_records(self, project_id: str):
         return self.store.reachable_revisions(project_id)
