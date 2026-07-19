@@ -19,6 +19,7 @@ from app.services.transactions import TransactionError
 from app.services.restore import RestoreError
 from app.transaction_models import CommitTransactionOutput, PrepareTransactionOutput, TransactionErrorOutput
 from app.restore_models import RestoreErrorOutput, RestoreRevisionResult
+from app.guard_models import GuardError
 
 mcp = FastMCP("TextSequence", instructions="Local-first TextSequence project collaboration.", streamable_http_path="/")
 
@@ -29,6 +30,7 @@ def _error(exc: Exception) -> dict[str, Any]:
     elif isinstance(exc, TimelineConflictError): code = "TIMELINE_CONFLICT"
     elif isinstance(exc, RevisionNotFoundError): code = "REVISION_NOT_FOUND"
     elif isinstance(exc, RevisionDiffError): code = exc.code
+    elif isinstance(exc, GuardError): code = exc.code
     elif isinstance(exc, FileNotFoundError): code = "PROJECT_NOT_FOUND"
     elif isinstance(exc, SilenceAnalysisError): code = exc.code
     elif isinstance(exc, ValidationError) and "Clip does not exist" in str(exc): code = "CLIP_NOT_FOUND"
@@ -51,6 +53,14 @@ def _error(exc: Exception) -> dict[str, Any]:
         "INTEGRITY_ERROR": "Project integrity validation failed",
         "PERSISTENCE_ERROR": "Transaction could not be persisted",
         "REVISION_CONFLICT": "Project revision is no longer the prepared base",
+        "GUARD_CONFLICT": "This edit is protected by an active edit guard",
+        "GUARD_NOT_FOUND": "Edit guard is not active",
+        "GUARD_CAPABILITY_INVALID": "The edit guard capability is invalid",
+        "INVALID_GUARD_SCOPE": "Guard scope is invalid",
+        "INVALID_GUARD_TTL": "Guard TTL is invalid",
+        "INVALID_GUARD_AUTHORIZATION": "Guard authorization is invalid",
+        "GUARD_LIMIT_EXCEEDED": "The edit guard limit has been reached",
+        "GUARD_STATE_ERROR": "Edit guard state could not be validated",
     }
     result = {"ok": False, "error": {"code": code, "message": messages.get(code, "Invalid argument")}}
     if isinstance(exc, StaleRevisionError) and exc.current_revision is not None:
@@ -60,6 +70,10 @@ def _error(exc: Exception) -> dict[str, Any]:
             value = getattr(exc, key, None)
             if value is not None:
                 result["error"][key] = value
+        if getattr(exc, "conflicts", None):
+            result["error"]["conflicts"] = exc.conflicts
+    if isinstance(exc, GuardError) and exc.conflicts:
+        result["error"]["conflicts"] = exc.conflicts
     return result
 
 
@@ -101,30 +115,31 @@ def analyze_silence(project_id: str, minimum_silence_ms: int = 700, noise_thresh
 
 @mcp.tool(structured_output=True)
 def remove_silence(project_id: str, expected_revision: int, minimum_silence_ms: int = 700,
-                  noise_threshold_db: float = -35, keep_padding_ms: int = 0) -> McpResult:
+                  noise_threshold_db: float = -35, keep_padding_ms: int = 0,
+                  guard_tokens: list[str] | None = None) -> McpResult:
     try:
         result = application.projects.remove_silence(project_id, expected_revision, minimum_silence_ms,
-                                                      noise_threshold_db, keep_padding_ms, origin="mcp", actor={"type": "agent"})
+                                                      noise_threshold_db, keep_padding_ms, origin="mcp", actor={"type": "agent"}, guard_tokens=guard_tokens)
         return {key: value for key, value in result.items() if key != "project"}
     except Exception as exc: return _error(exc)
 
 
 @mcp.tool(structured_output=True)
-def split_clip(project_id: str, clip_id: str, timeline_frame: int, expected_revision: int) -> McpResult:
-    return _mutation(lambda *args: application.projects.split(*args, origin="mcp", actor={"type": "agent"}), project_id, clip_id, timeline_frame, expected_revision)
+def split_clip(project_id: str, clip_id: str, timeline_frame: int, expected_revision: int, guard_tokens: list[str] | None = None) -> McpResult:
+    return _mutation(lambda *args: application.projects.split(*args, origin="mcp", actor={"type": "agent"}, guard_tokens=guard_tokens), project_id, clip_id, timeline_frame, expected_revision)
 
 
 @mcp.tool(structured_output=True)
-def delete_clip(project_id: str, clip_id: str, expected_revision: int) -> McpResult:
-    return _mutation(lambda *args: application.projects.delete(*args, origin="mcp", actor={"type": "agent"}), project_id, clip_id, expected_revision)
+def delete_clip(project_id: str, clip_id: str, expected_revision: int, guard_tokens: list[str] | None = None) -> McpResult:
+    return _mutation(lambda *args: application.projects.delete(*args, origin="mcp", actor={"type": "agent"}, guard_tokens=guard_tokens), project_id, clip_id, expected_revision)
 
 
 @mcp.tool(structured_output=True)
-def move_clip(project_id: str, clip_id: str, expected_revision: int, destination: dict[str, Any]) -> McpResult:
+def move_clip(project_id: str, clip_id: str, expected_revision: int, destination: dict[str, Any], guard_tokens: list[str] | None = None) -> McpResult:
     try:
         kind = destination.get("kind")
-        if kind == "timeline_frame": result = application.projects.move(project_id, clip_id, int(destination["timeline_start_frame"]), expected_revision, origin="mcp", actor={"type": "agent"})
-        elif kind == "gap" and destination.get("alignment") == "start": result = application.projects.move_to_gap(project_id, clip_id, int(destination["gap_ordinal"]), expected_revision, origin="mcp", actor={"type": "agent"})
+        if kind == "timeline_frame": result = application.projects.move(project_id, clip_id, int(destination["timeline_start_frame"]), expected_revision, origin="mcp", actor={"type": "agent"}, guard_tokens=guard_tokens)
+        elif kind == "gap" and destination.get("alignment") == "start": result = application.projects.move_to_gap(project_id, clip_id, int(destination["gap_ordinal"]), expected_revision, origin="mcp", actor={"type": "agent"}, guard_tokens=guard_tokens)
         else: raise ValidationError("destination must be a timeline_frame or start-aligned gap")
         return {"ok": True, "project_id": result.id, "revision": result.revision, "revision_id": result.revision_id,
                 "timeline_id": result.timeline.id, "timeline": application.projects.timeline(result.id)}
@@ -132,18 +147,18 @@ def move_clip(project_id: str, clip_id: str, expected_revision: int, destination
 
 
 @mcp.tool(structured_output=True)
-def trim_clip(project_id: str, clip_id: str, expected_revision: int, edge: str, frames_to_remove: int) -> McpResult:
-    return _mutation(lambda *args: application.projects.trim_relative(*args, origin="mcp", actor={"type": "agent"}), project_id, clip_id, expected_revision, edge, frames_to_remove)
+def trim_clip(project_id: str, clip_id: str, expected_revision: int, edge: str, frames_to_remove: int, guard_tokens: list[str] | None = None) -> McpResult:
+    return _mutation(lambda *args: application.projects.trim_relative(*args, origin="mcp", actor={"type": "agent"}, guard_tokens=guard_tokens), project_id, clip_id, expected_revision, edge, frames_to_remove)
 
 
 @mcp.tool(structured_output=True)
 def add_marker(project_id: str, expected_revision: int, start_frame: int, name: str,
                end_frame: int | None = None, description: str = "", type: str = "generic",
-               production: dict[str, Any] | None = None) -> McpResult:
+               production: dict[str, Any] | None = None, guard_tokens: list[str] | None = None) -> McpResult:
     try:
         before = application.projects.get(project_id)
         result = application.projects.add_marker(project_id, expected_revision, start_frame, end_frame, name,
-                                                  description, type, production, origin="mcp", actor={"type": "agent"})
+                                                  description, type, production, origin="mcp", actor={"type": "agent"}, guard_tokens=guard_tokens)
         prior_ids = {marker.id for marker in before.timeline.markers}
         marker_id = next(marker.id for marker in result.timeline.markers if marker.id not in prior_ids)
         response = _mutation(lambda: result)
@@ -155,10 +170,10 @@ def add_marker(project_id: str, expected_revision: int, start_frame: int, name: 
 
 
 @mcp.tool(structured_output=True)
-def update_marker(project_id: str, marker_id: str, expected_revision: int, changes: dict[str, Any]) -> McpResult:
+def update_marker(project_id: str, marker_id: str, expected_revision: int, changes: dict[str, Any], guard_tokens: list[str] | None = None) -> McpResult:
     try:
         result = application.projects.update_marker(project_id, expected_revision, marker_id, changes,
-                                                     origin="mcp", actor={"type": "agent"})
+                                                     origin="mcp", actor={"type": "agent"}, guard_tokens=guard_tokens)
         response = _mutation(lambda: result)
         response["marker_id"] = marker_id
         response["marker"] = next(marker for marker in application.projects.timeline(result.id)["markers"] if marker["id"] == marker_id)
@@ -168,10 +183,10 @@ def update_marker(project_id: str, marker_id: str, expected_revision: int, chang
 
 
 @mcp.tool(structured_output=True)
-def delete_marker(project_id: str, marker_id: str, expected_revision: int) -> McpResult:
+def delete_marker(project_id: str, marker_id: str, expected_revision: int, guard_tokens: list[str] | None = None) -> McpResult:
     try:
         result = application.projects.delete_marker(project_id, expected_revision, marker_id,
-                                                     origin="mcp", actor={"type": "agent"})
+                                                     origin="mcp", actor={"type": "agent"}, guard_tokens=guard_tokens)
         response = _mutation(lambda: result)
         response["deleted_marker_id"] = marker_id
         return response
@@ -231,11 +246,11 @@ def prepare_transaction(project_id: str, expected_revision: int, operations: lis
     annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False),
     structured_output=True,
 )
-def commit_transaction(project_id: str, transaction_hash: str, prepared_transaction: dict[str, Any]) -> CommitTransactionOutput | TransactionErrorOutput:
+def commit_transaction(project_id: str, transaction_hash: str, prepared_transaction: dict[str, Any], guard_tokens: list[str] | None = None) -> CommitTransactionOutput | TransactionErrorOutput:
     try:
         return application.projects.commit_transaction(
             project_id,
-            {"transaction_hash": transaction_hash, "prepared_transaction": prepared_transaction},
+            {"transaction_hash": transaction_hash, "prepared_transaction": prepared_transaction, "guard_tokens": guard_tokens or []},
             origin="mcp", actor={"type": "agent"},
         ).model_dump(mode="json")
     except Exception as exc:
@@ -247,14 +262,60 @@ def commit_transaction(project_id: str, transaction_hash: str, prepared_transact
     structured_output=True,
 )
 def restore_revision(project_id: str, target_revision_id: str, expected_revision: int,
-                     expected_revision_id: str) -> RestoreRevisionResult | RestoreErrorOutput:
+                     expected_revision_id: str, guard_tokens: list[str] | None = None) -> RestoreRevisionResult | RestoreErrorOutput:
     try:
         result = application.projects.restore_revision(
             project_id, target_revision_id,
-            {"expected_revision": expected_revision, "expected_revision_id": expected_revision_id},
+            {"expected_revision": expected_revision, "expected_revision_id": expected_revision_id, "guard_tokens": guard_tokens or []},
             origin="mcp", actor={"type": "agent"},
         )
         return result.model_dump(mode="json")
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False),
+    structured_output=True,
+)
+def acquire_edit_guard(project_id: str, owner: dict[str, Any], scope: dict[str, Any],
+                       ttl_seconds: int | None = None, purpose: str | None = None) -> McpResult:
+    try:
+        return application.projects.guards.acquire(project_id, owner, scope, ttl_seconds, purpose)
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False),
+    structured_output=True,
+)
+def renew_edit_guard(project_id: str, guard_id: str, guard_token: str,
+                     ttl_seconds: int | None = None) -> McpResult:
+    try:
+        return application.projects.guards.renew(project_id, guard_id, guard_token, ttl_seconds)
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=True),
+    structured_output=True,
+)
+def release_edit_guard(project_id: str, guard_id: str, guard_token: str) -> McpResult:
+    try:
+        return application.projects.guards.release(project_id, guard_id, guard_token)
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True),
+    structured_output=True,
+)
+def list_edit_guards(project_id: str) -> McpResult:
+    try:
+        return application.projects.guards.list(project_id)
     except Exception as exc:
         return _error(exc)
 

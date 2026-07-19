@@ -43,9 +43,36 @@ flowchart TD
 - **MCP Adapter:** exposes the same service through Streamable HTTP. It returns
   safe projections and never exposes source paths through timeline inspection.
   v0.3.0 adds stateless `prepare_transaction` and `commit_transaction` tools;
-  v0.3.1 adds forward-only `restore_revision`; v0.2.3 added the typed
+  v0.3.1 adds forward-only `restore_revision`; v0.4.0 adds public EditGuards;
+  v0.2.3 added the typed
   `query_timeline` and `diff_revisions` tools; eight
   read-only Resources and REST reads reuse the same safe read boundaries.
+
+## Public EditGuards
+
+EditGuards are server-enforced coordination state, separate from the internal
+per-project `RLock`. A guard contains a descriptive owner, a normalized
+project/selection scope, a lease, and a persisted SHA-256 capability hash.
+Owner metadata is not authentication or authorization: possession of the
+capability is the only authorization mechanism.
+
+Selection scopes use explicit clip IDs, marker IDs, and integer half-open
+timeline ranges. Ranges are union-normalized by sorting, deduplicating, and
+merging overlaps or adjacency. A canonical mutation derives one atomic
+before-to-final `MutationFootprint`; transaction authorization never reasons
+about transient intermediate states. Restore is always project-wide.
+
+Guard state lives outside canonical projects and immutable revision history in
+ignored runtime storage. Writes are atomic. Missing state means no guards, but
+an existing corrupt, unreadable, mismatched, or unsupported state fails closed
+with `GUARD_STATE_ERROR`. Unexpired leases survive a restart; there is no
+background cleanup worker and no distributed coordination claim.
+
+Transactions deliberately remain split into a deterministic, read-only,
+guard-agnostic prepare and a commit that rechecks current guards under the
+project lock. Successful transaction preparation does not imply authorization
+to commit. All canonical mutation paths use the shared service authorization,
+including restore, silence removal, and media import/upload.
 - **Read Surface:** project, timeline, asset, clip, marker, and revision
   projections are transport-neutral. Revision reads walk only the chain
   reachable from HEAD and never promote legacy flat projects or expose raw

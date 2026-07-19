@@ -15,7 +15,7 @@ The MCP endpoint remains available without `OPENAI_API_KEY`.
 
 ## Available tools
 
-The current server exposes exactly these 19 tools:
+The current server exposes exactly these 23 tools:
 
 ### `list_projects()`
 
@@ -180,6 +180,48 @@ results, generated IDs, canonical changes, and summary match the revision diff
 from the base revision to the committed revision. Transactions are local,
 vendor-neutral, and have no persistent prepared-transaction store or schema
 migration.
+
+`commit_transaction` also accepts optional `guard_tokens` outside the prepared
+transaction. Preparation remains guard-agnostic and deterministic; successful
+preparation does not imply authorization to commit. Commit rechecks active
+guards under the project lock.
+
+### Edit guards
+
+The four additional tools are `acquire_edit_guard`, `renew_edit_guard`,
+`release_edit_guard`, and `list_edit_guards`. They coordinate overlapping
+canonical edits without adding authentication or identity claims. Owner
+metadata is descriptive only; authorization comes exclusively from the bearer
+capability returned once by acquisition. The plaintext capability is never
+listed, persisted, placed in revision metadata, or returned in conflict
+details.
+
+Scopes are either `{ "kind": "project" }` or a selection containing explicit
+clip IDs, marker IDs, and canonical half-open frame ranges `[start_frame,
+end_frame)`. Selectors use union semantics. Ranges are sorted, deduplicated,
+and merged when overlapping or adjacent. Clip and marker IDs are validated at
+acquisition time; a range may extend beyond current content.
+
+Leases default to 600 seconds and accept 30–3600 seconds. Renewal replaces
+the expiry with `authorization_time + ttl`; expired guards stop blocking and
+cannot be renewed. Release is idempotent, while renewal requires the active
+capability. Unexpired guards persist in ignored runtime state across a local
+backend restart. Guard state writes are atomic. A missing state file means no
+guards; an invalid or unreadable existing state fails closed with
+`GUARD_STATE_ERROR` before any canonical mutation.
+
+Guard authorization is applied to clip and marker mutations, transactions,
+restore, silence removal, and media import/upload. Project-wide restore and
+media-import footprints are protected by every active guard. Different
+descriptive owners may delegate capabilities together; all conflicting guards
+must be authorized. `GUARD_CONFLICT` details contain only guard IDs and expiry
+times. The GUI has no token-entry surface: an uncredentialed conflicting edit
+is blocked with a safe explanation until the guard expires or is released.
+
+The internal per-project RLock remains the synchronization primitive. Public
+EditGuards are runtime coordination state, and the supported coordination
+model is one local backend process rather than distributed locking. There is
+no guard Resource and the eight existing Resource shapes are unchanged.
 
 ## Read-only Resources
 

@@ -24,8 +24,8 @@ def seeded_service(tmp_path):
     return service, project
 
 
-def test_mcp_exposes_exactly_nineteen_tools_and_eight_resources():
-    assert len(mcp._tool_manager.list_tools()) == 19
+def test_mcp_exposes_exactly_twenty_three_tools_and_eight_resources():
+    assert len(mcp._tool_manager.list_tools()) == 23
     assert {tool.name for tool in mcp._tool_manager.list_tools()} >= {"query_timeline"}
     assert len(mcp._resource_manager.list_resources()) == 1
     assert len(mcp._resource_manager.list_templates()) == 7

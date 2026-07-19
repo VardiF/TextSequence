@@ -10,6 +10,7 @@ class McpError(BaseModel):
     code: str
     message: str
     current_revision: int | None = None
+    conflicts: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class McpResult(BaseModel):
