@@ -15,7 +15,7 @@ The MCP endpoint remains available without `OPENAI_API_KEY`.
 
 ## Available tools
 
-The current server exposes exactly these 11 tools:
+The current server exposes exactly these 14 tools:
 
 ### `list_projects()`
 

@@ -32,7 +32,7 @@ editor to apply one revision-checked batch edit.
 
 ## OpenAI ecosystem / MCP
 
-The product exposes a real Streamable HTTP MCP server with 11 tools. It can be
+The product exposes a real Streamable HTTP MCP server with 14 tools. It can be
 connected to compatible external clients, including Codex CLI registration.
 An optional built-in OpenAI assistant is available when configured, but core
 editing and MCP workflows require no `OPENAI_API_KEY`.
