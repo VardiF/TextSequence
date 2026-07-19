@@ -26,6 +26,7 @@ from app.revision_diff_models import RevisionDiffMetadata, RevisionDiffResult
 from app.services.projections import revision_metadata_projection
 from app.services.transactions import TransactionService
 from app.services.restore import RestoreService
+from app.services.guards import GuardService
 
 
 class ProjectService:
@@ -36,6 +37,7 @@ class ProjectService:
         self.media_root = media_root or Path("media")
         self._locks: dict[str, RLock] = {}
         self._locks_guard = Lock()
+        self.guards = GuardService(self)
         self.transactions = TransactionService(self)
         self.restore = RestoreService(self)
 
@@ -153,7 +155,8 @@ class ProjectService:
 
     def remove_silence(self, project_id: str, expected_revision: int, minimum_silence_ms: int = 700,
                        noise_threshold_db: float = -35, keep_padding_ms: int = 0,
-                       origin: str = "rest", actor: Optional[dict[str, str]] = None) -> dict:
+                       origin: str = "rest", actor: Optional[dict[str, str]] = None,
+                       guard_tokens: Optional[list[str]] = None) -> dict:
         validate_parameters(minimum_silence_ms, noise_threshold_db, keep_padding_ms)
         initial = self.store.load(project_id)
         analyses = self._analyze_project_silence(initial, minimum_silence_ms, noise_threshold_db)
@@ -171,7 +174,7 @@ class ProjectService:
         _, removed_frames, removed_count, applied = apply_silence_removals(initial, removals)
         project_result = self._commit_operation(project_id, expected_revision,
             lambda current: apply_silence_removals(current, removals)[0], origin, actor,
-            "remove_silence", "Remove detected silence")
+            "remove_silence", "Remove detected silence", guard_tokens=guard_tokens)
         new_revision = project_result.revision
         resulting_clip_count = sum(len(track.clips) for track in project_result.timeline.tracks)
         fps = initial.fps.as_tuple() if initial.fps else (1, 1)
@@ -190,10 +193,11 @@ class ProjectService:
             if asset.id == asset_id: return Path(asset.path)
         raise FileNotFoundError(f"Asset does not exist: {asset_id}")
 
-    def import_media(self, project_id: str, path: str, origin: str = "rest", actor: Optional[dict[str, str]] = None):
+    def import_media(self, project_id: str, path: str, origin: str = "rest", actor: Optional[dict[str, str]] = None,
+                     guard_tokens: Optional[list[str]] = None):
         asset = probe_media(path)
         return self._commit_operation(project_id, None, lambda project: register_asset(project, asset), origin, actor,
-                                      "import_media", f"Import media {asset.name}")
+                                      "import_media", f"Import media {asset.name}", guard_tokens=guard_tokens)
 
     @staticmethod
     def _safe_upload_name(filename: Optional[str]) -> str:
@@ -203,7 +207,8 @@ class ProjectService:
         return basename[:180] or "video"
 
     async def import_uploaded_media(self, project_id: str, upload, expected_revision: int,
-                                    origin: str = "rest", actor: Optional[dict[str, str]] = None):
+                                    origin: str = "rest", actor: Optional[dict[str, str]] = None,
+                                    guard_tokens: Optional[list[str]] = None):
         # Validate the project before creating any managed media directory.
         self.store.load(project_id)
         safe_name = self._safe_upload_name(getattr(upload, "filename", None))
@@ -226,7 +231,7 @@ class ProjectService:
             asset = probe_media(str(destination), display_name=safe_name)
             return self._commit_operation(project_id, expected_revision,
                 lambda project: register_asset(project, asset), origin, actor,
-                "import_media", f"Import media {asset.name}")
+                "import_media", f"Import media {asset.name}", guard_tokens=guard_tokens)
         except Exception:
             for path in (temporary, destination):
                 try:
@@ -240,7 +245,8 @@ class ProjectService:
                 await close()
 
     def _commit_operation(self, project_id: str, expected_revision: Optional[int], operation, origin: str,
-                          actor: Optional[dict[str, str]], operation_name: str, summary: str):
+                          actor: Optional[dict[str, str]], operation_name: str, summary: str,
+                          *, guard_tokens: Optional[list[str]] = None):
         with self._project_lock(project_id):
             loaded = self.store.load_with_source(project_id)
             project = loaded.project
@@ -251,51 +257,56 @@ class ProjectService:
             edited = operation(deepcopy(project))
             if project_to_dict(edited) == project_to_dict(project):
                 return project
+            self.guards.authorize(project_id, project, edited, guard_tokens)
             edited.revision = project.revision + 1
             edited.revision_id = self.store.revision_id_factory()
             return self.store.commit(loaded, edited, project.revision_id, origin,
                                      actor or {"type": "human"}, operation_name, summary, project.revision)
 
     def _mutate(self, project_id: str, expected_revision: int, operation, *args, origin: str = "rest",
-                actor: Optional[dict[str, str]] = None, operation_name: str = "edit", summary: str = "Edit timeline"):
+                actor: Optional[dict[str, str]] = None, operation_name: str = "edit", summary: str = "Edit timeline",
+                guard_tokens: Optional[list[str]] = None):
         return self._commit_operation(project_id, expected_revision,
-                                      lambda project: operation(project, *args), origin, actor, operation_name, summary)
+                                      lambda project: operation(project, *args), origin, actor, operation_name, summary,
+                                      guard_tokens=guard_tokens)
 
-    def split(self, project_id, clip_id, timeline_frame, expected_revision, origin="rest", actor=None): return self._mutate(project_id, expected_revision, split_clip, clip_id, timeline_frame, origin=origin, actor=actor, operation_name="split_clip", summary="Split clip")
-    def delete(self, project_id, clip_id, expected_revision, origin="rest", actor=None): return self._mutate(project_id, expected_revision, delete_clip, clip_id, origin=origin, actor=actor, operation_name="delete_clip", summary="Delete clip")
-    def move(self, project_id, clip_id, timeline_start_frame, expected_revision, origin="rest", actor=None): return self._mutate(project_id, expected_revision, move_clip, clip_id, timeline_start_frame, origin=origin, actor=actor, operation_name="move_clip", summary="Move clip")
-    def trim(self, project_id, clip_id, expected_revision, source_in_frame=None, source_out_frame=None, origin="rest", actor=None): return self._mutate(project_id, expected_revision, trim_clip, clip_id, source_in_frame, source_out_frame, origin=origin, actor=actor, operation_name="trim_clip", summary="Trim clip")
+    def split(self, project_id, clip_id, timeline_frame, expected_revision, origin="rest", actor=None, guard_tokens=None): return self._mutate(project_id, expected_revision, split_clip, clip_id, timeline_frame, origin=origin, actor=actor, operation_name="split_clip", summary="Split clip", guard_tokens=guard_tokens)
+    def delete(self, project_id, clip_id, expected_revision, origin="rest", actor=None, guard_tokens=None): return self._mutate(project_id, expected_revision, delete_clip, clip_id, origin=origin, actor=actor, operation_name="delete_clip", summary="Delete clip", guard_tokens=guard_tokens)
+    def move(self, project_id, clip_id, timeline_start_frame, expected_revision, origin="rest", actor=None, guard_tokens=None): return self._mutate(project_id, expected_revision, move_clip, clip_id, timeline_start_frame, origin=origin, actor=actor, operation_name="move_clip", summary="Move clip", guard_tokens=guard_tokens)
+    def trim(self, project_id, clip_id, expected_revision, source_in_frame=None, source_out_frame=None, origin="rest", actor=None, guard_tokens=None): return self._mutate(project_id, expected_revision, trim_clip, clip_id, source_in_frame, source_out_frame, origin=origin, actor=actor, operation_name="trim_clip", summary="Trim clip", guard_tokens=guard_tokens)
 
     def add_marker(self, project_id: str, expected_revision: int, start_frame: int, end_frame=None,
                    name: str = "", description: str = "", marker_type: str = "generic", production=None,
-                   origin="rest", actor=None):
+                   origin="rest", actor=None, guard_tokens=None):
         marker = Marker(new_marker_id(), start_frame, end_frame, name, description, marker_type,
                         marker_production_from_dict(production))
         return self._mutate(project_id, expected_revision, add_marker, marker, origin=origin, actor=actor,
-                            operation_name="add_marker", summary="Add timeline marker")
+                            operation_name="add_marker", summary="Add timeline marker", guard_tokens=guard_tokens)
 
     def update_marker(self, project_id: str, expected_revision: int, marker_id: str, changes: dict,
-                      origin="rest", actor=None):
+                      origin="rest", actor=None, guard_tokens=None):
         normalized = dict(changes)
         if "production" in normalized:
             normalized["production"] = marker_production_from_dict(normalized["production"])
         return self._mutate(project_id, expected_revision, update_marker, marker_id, normalized,
-                            origin=origin, actor=actor, operation_name="update_marker", summary="Update timeline marker")
+                            origin=origin, actor=actor, operation_name="update_marker", summary="Update timeline marker",
+                            guard_tokens=guard_tokens)
 
-    def delete_marker(self, project_id: str, expected_revision: int, marker_id: str, origin="rest", actor=None):
+    def delete_marker(self, project_id: str, expected_revision: int, marker_id: str, origin="rest", actor=None, guard_tokens=None):
         return self._mutate(project_id, expected_revision, delete_marker, marker_id,
-                            origin=origin, actor=actor, operation_name="delete_marker", summary="Delete timeline marker")
+                            origin=origin, actor=actor, operation_name="delete_marker", summary="Delete timeline marker",
+                            guard_tokens=guard_tokens)
 
-    def trim_relative(self, project_id, clip_id, expected_revision, edge, frames_to_remove, origin="rest", actor=None):
+    def trim_relative(self, project_id, clip_id, expected_revision, edge, frames_to_remove, origin="rest", actor=None, guard_tokens=None):
         if edge not in ("start", "end") or not isinstance(frames_to_remove, int) or frames_to_remove <= 0:
             raise ValidationError("edge must be start or end and frames_to_remove must be positive")
         def operation(project):
             clip = next((c for t in project.timeline.tracks for c in t.clips if c.id == clip_id), None)
             if clip is None: raise ValidationError(f"Clip does not exist: {clip_id}")
             return trim_clip(project, clip_id, clip.source_in_frame + frames_to_remove, None) if edge == "start" else trim_clip(project, clip_id, None, clip.source_out_frame - frames_to_remove)
-        return self._commit_operation(project_id, expected_revision, operation, origin, actor, "trim_clip", "Trim clip")
+        return self._commit_operation(project_id, expected_revision, operation, origin, actor, "trim_clip", "Trim clip", guard_tokens=guard_tokens)
 
-    def move_to_gap(self, project_id, clip_id, gap_ordinal, expected_revision, origin="rest", actor=None):
+    def move_to_gap(self, project_id, clip_id, gap_ordinal, expected_revision, origin="rest", actor=None, guard_tokens=None):
         if not isinstance(gap_ordinal, int) or gap_ordinal < 1: raise ValidationError("gap_ordinal must be positive")
         def operation(project):
             for track in project.timeline.tracks:
@@ -310,7 +321,7 @@ class ProjectService:
                     result = move_clip(project, clip_id, gap["start_frame"])
                     return result
             raise ValidationError(f"Clip does not exist: {clip_id}")
-        return self._commit_operation(project_id, expected_revision, operation, origin, actor, "move_clip", "Move clip to gap")
+        return self._commit_operation(project_id, expected_revision, operation, origin, actor, "move_clip", "Move clip to gap", guard_tokens=guard_tokens)
 
     def render(self, project_id: str, expected_revision: int, render_type: str) -> RenderResult:
         if render_type not in ("preview", "export"): raise ValidationError("Unknown render type")

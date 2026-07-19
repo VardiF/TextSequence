@@ -192,6 +192,7 @@ class PreparedTransaction(_StrictModel):
 class CommitTransactionRequest(_StrictModel):
     transaction_hash: Annotated[StrictStr, Field(pattern=r"[0-9a-f]{64}")]
     prepared_transaction: PreparedTransaction
+    guard_tokens: list[StrictStr] = Field(default_factory=list)
 
 
 class OperationResult(_StrictModel):
@@ -210,6 +211,7 @@ class TransactionErrorDetail(_StrictModel):
     cause_code: StrictStr | None = None
     current_revision: StrictInt | None = None
     current_revision_id: StrictStr | None = None
+    conflicts: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class TransactionErrorOutput(_StrictModel):

@@ -19,12 +19,13 @@ if TYPE_CHECKING:
 
 class RestoreError(Exception):
     def __init__(self, code: str, message: str, *, current_revision: int | None = None,
-                 current_revision_id: str | None = None) -> None:
+                 current_revision_id: str | None = None, conflicts: list[dict] | None = None) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
         self.current_revision = current_revision
         self.current_revision_id = current_revision_id
+        self.conflicts = conflicts or []
 
 
 def _canonical_state(project) -> dict[str, Any]:
@@ -98,6 +99,19 @@ class RestoreService:
                 raise
             except (ValidationError, RevisionDiffIntegrityError) as exc:
                 raise RestoreError("INTEGRITY_ERROR", "Project integrity validation failed") from exc
+
+            try:
+                # Restore replaces the canonical project state and therefore
+                # always has a project-wide authorization footprint.
+                from app.guard_models import MutationFootprint
+                self.projects.guards.authorize(
+                    project_id, current, candidate, request.guard_tokens,
+                    footprint=MutationFootprint(project_wide=True),
+                )
+            except Exception as exc:
+                if hasattr(exc, "code"):
+                    raise RestoreError(exc.code, exc.message, conflicts=getattr(exc, "conflicts", [])) from exc
+                raise
 
             try:
                 committed = self.projects.store.commit(

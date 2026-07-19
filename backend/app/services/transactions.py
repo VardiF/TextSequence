@@ -45,7 +45,8 @@ _SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z")
 class TransactionError(Exception):
     def __init__(self, code: str, message: str, *, operation_index: int | None = None,
                  operation: str | None = None, cause_code: str | None = None,
-                 current_revision: int | None = None, current_revision_id: str | None = None) -> None:
+                 current_revision: int | None = None, current_revision_id: str | None = None,
+                 conflicts: list[dict] | None = None) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
@@ -54,6 +55,7 @@ class TransactionError(Exception):
         self.cause_code = cause_code
         self.current_revision = current_revision
         self.current_revision_id = current_revision_id
+        self.conflicts = conflicts or []
 
 
 class TransactionRevisionConflict(TransactionError):
@@ -360,6 +362,12 @@ class TransactionService:
             if project_to_dict(candidate) == project_to_dict(base):
                 raise TransactionError("NO_CHANGES", "The transaction would not change the project", cause_code="NO_CHANGES")
             diff = _diff(base, candidate)
+            try:
+                self.projects.guards.authorize(project_id, base, candidate, request.guard_tokens)
+            except Exception as exc:
+                if hasattr(exc, "code"):
+                    raise TransactionError(exc.code, exc.message, conflicts=getattr(exc, "conflicts", [])) from exc
+                raise
             candidate.revision = base.revision + 1
             candidate.revision_id = self.projects.store.revision_id_factory()
             try:

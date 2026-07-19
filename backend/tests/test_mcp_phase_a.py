@@ -22,15 +22,16 @@ def seeded_service(tmp_path):
     return service, project
 
 
-def test_mcp_tool_discovery_contains_v031_surface():
+def test_mcp_tool_discovery_contains_v040_surface():
     mcp.streamable_http_app()
     assert {tool.name for tool in mcp._tool_manager.list_tools()} == {
         "list_projects", "get_timeline", "get_editor_context", "split_clip", "delete_clip", "move_clip",
         "trim_clip", "render_preview", "export_project", "analyze_silence", "remove_silence",
             "add_marker", "update_marker", "delete_marker",
             "query_timeline",
-        "diff_revisions", "prepare_transaction", "commit_transaction", "restore_revision",
-        }
+            "diff_revisions", "prepare_transaction", "commit_transaction", "restore_revision",
+            "acquire_edit_guard", "renew_edit_guard", "release_edit_guard", "list_edit_guards",
+            }
 
 
 def test_editor_context_is_validated_against_authoritative_project(tmp_path):

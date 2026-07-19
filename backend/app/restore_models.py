@@ -18,6 +18,7 @@ class _StrictModel(BaseModel):
 class RestoreRevisionRequest(_StrictModel):
     expected_revision: Annotated[StrictInt, Field(ge=0)]
     expected_revision_id: Annotated[StrictStr, Field(pattern=REVISION_ID_PATTERN)]
+    guard_tokens: list[StrictStr] = Field(default_factory=list)
 
 
 class RestoreRevisionResult(_StrictModel):
@@ -37,6 +38,7 @@ class RestoreErrorDetail(_StrictModel):
     message: StrictStr
     current_revision: StrictInt | None = None
     current_revision_id: StrictStr | None = None
+    conflicts: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class RestoreErrorOutput(_StrictModel):

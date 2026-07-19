@@ -30,19 +30,20 @@ Suggested recording assets:
 
 ## Features
 
-Implemented in v0.3.1:
+Implemented in v0.4.0:
 
 - local MP4 import and media streaming;
 - canonical integer-frame V1 timeline with stable IDs;
 - clip selection, split, trim, move, and delete;
 - Render Preview and MP4 export through local FFmpeg;
-- real Streamable HTTP MCP server with 19 tools, including timeline querying, deterministic revision diffs, forward-only revision restore, marker mutations, and stateless transactions;
+- real Streamable HTTP MCP server with 23 tools, including timeline querying, deterministic revision diffs, forward-only revision restore, marker mutations, stateless transactions, and guarded editing;
 - eight read-only MCP Resources plus safe REST timeline/query/revision/diff reads;
 - canonical point and range timeline markers with deterministic ordering;
 - revision-safe human and external-agent co-editing;
 - schema-v2 canonical projects with explicit Timeline identity;
 - immutable full-snapshot revision history with safe v1 promotion; and
 - deterministic local silence analysis and removal;
+- opt-in public EditGuards with capability-based authorization, leases, fail-closed runtime state, and guarded canonical mutations;
 - optional built-in OpenAI assistant; and
 - no `OPENAI_API_KEY` requirement for core editing, rendering, or MCP use.
 
@@ -105,8 +106,7 @@ external references.
 
 The deliberate Node choice is Node 18 + Vite 6: this pinned configuration is
 stable and the production build passes; upgrading Node is not needed for this
-release. The backend remains compatible with the existing Node 18 frontend
-toolchain; no Node upgrade is required for v0.3.1.
+release.
 
 ## Canonical project and revisions
 
@@ -145,7 +145,7 @@ revision and stable IDs, mutate with `expected_revision`, then inspect again.
 
 ## Available MCP tools
 
-The server exposes exactly 19 tools:
+The server exposes exactly 23 tools:
 
 1. `list_projects`
 2. `get_timeline`
@@ -166,6 +166,10 @@ The server exposes exactly 19 tools:
 17. `prepare_transaction`
 18. `commit_transaction`
 19. `restore_revision`
+20. `acquire_edit_guard`
+21. `renew_edit_guard`
+22. `release_edit_guard`
+23. `list_edit_guards`
 
 The server also exposes eight read-only JSON Resources: the project collection,
 current project, current timeline, asset, clip, marker, revision collection,
