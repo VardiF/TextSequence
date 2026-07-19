@@ -13,6 +13,9 @@ from app.agent.runtime import AgentConfigurationError, AgentRuntime
 from app.audio.silence import SilenceAnalysisError
 from app.media.probe import ProbeError, find_ffprobe
 from app.persistence.project_store import StaleRevisionError
+from app.persistence.project_store import RevisionNotFoundError
+from app.services.projections import revision_metadata_projection, revision_projection
+from app.services.query import QueryValidationError
 from copy import deepcopy
 
 router = APIRouter(prefix="/api")
@@ -118,7 +121,7 @@ def health():
     return {
         "status": "ok",
         "ffprobe": {"available": bool(ffprobe), "path": ffprobe},
-        "mcp": {"status": "running", "endpoint": "http://127.0.0.1:8000/mcp", "transport": "Streamable HTTP", "tool_count": 14},
+        "mcp": {"status": "running", "endpoint": "http://127.0.0.1:8000/mcp", "transport": "Streamable HTTP", "tool_count": 15, "resource_count": 8},
         "built_in_assistant": {"configured": agent_runtime.configured()},
     }
 
@@ -179,6 +182,51 @@ def get_project(project_id: str):
         return _rest_project(service.get(project_id))
     except (FileNotFoundError, ValidationError) as exc:
         raise HTTPException(404, str(exc)) from exc
+
+
+@router.get("/projects/{project_id}/timeline")
+def get_timeline(project_id: str):
+    try:
+        return service.timeline(project_id)
+    except (FileNotFoundError, ValidationError) as exc:
+        raise HTTPException(404, {"code": "PROJECT_NOT_FOUND", "message": "Project does not exist"}) from exc
+
+
+@router.post("/projects/{project_id}/timeline/query")
+def query_timeline_route(project_id: str, request: dict):
+    try:
+        return service.query_timeline(project_id, request)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, {"code": "PROJECT_NOT_FOUND", "message": "Project does not exist"}) from exc
+    except (ValidationError, QueryValidationError) as exc:
+        raise HTTPException(400, {"code": "INVALID_QUERY", "message": str(exc)}) from exc
+
+
+@router.get("/projects/{project_id}/revisions")
+def list_revisions(project_id: str):
+    try:
+        available, records = service.revision_records(project_id)
+        project = service.get(project_id)
+        return {"project_id": project_id, "revision": project.revision, "revision_id": project.revision_id,
+                "history_available": available,
+                "revisions": [revision_metadata_projection(record.metadata, is_head=index == 0) for index, record in enumerate(records)]}
+    except FileNotFoundError as exc:
+        raise HTTPException(404, {"code": "PROJECT_NOT_FOUND", "message": "Project does not exist"}) from exc
+    except ValidationError as exc:
+        raise HTTPException(500, {"code": "INTEGRITY_ERROR", "message": "Project integrity validation failed"}) from exc
+
+
+@router.get("/projects/{project_id}/revisions/{revision_id}")
+def get_revision(project_id: str, revision_id: str):
+    try:
+        record = service.revision_record(project_id, revision_id)
+        return revision_projection(record, is_head=record.metadata.revision_id == service.get(project_id).revision_id)
+    except RevisionNotFoundError as exc:
+        raise HTTPException(404, {"code": "REVISION_NOT_FOUND", "message": str(exc)}) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(404, {"code": "PROJECT_NOT_FOUND", "message": "Project does not exist"}) from exc
+    except ValidationError as exc:
+        raise HTTPException(500, {"code": "INTEGRITY_ERROR", "message": "Project integrity validation failed"}) from exc
 
 
 @router.get("/projects/{project_id}/assets/{asset_id}/media")

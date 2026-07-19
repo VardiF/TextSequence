@@ -19,6 +19,10 @@ class StaleRevisionError(ValueError):
         self.current_revision = current_revision
 
 
+class RevisionNotFoundError(FileNotFoundError):
+    pass
+
+
 @dataclass(frozen=True)
 class LoadedProject:
     project: Project
@@ -246,3 +250,28 @@ class ProjectStore:
         ids = {path.stem for path in self.root.glob("*.json") if path.is_file()}
         ids.update(path.name for path in self.root.iterdir() if path.is_dir() and (path / "head.json").is_file())
         return [self.load(project_id) for project_id in sorted(ids)]
+
+    def reachable_revisions(self, project_id: str) -> tuple[bool, list[RevisionRecord]]:
+        loaded = self.load_with_source(project_id)
+        if loaded.source != "directory":
+            return False, []
+        directory = self.directory_for(project_id)
+        record = self._load_revision_record(directory, loaded.project.revision_id)
+        self._validate_reachable_chain(directory, record)
+        records = []
+        current = record
+        while current is not None:
+            records.append(current)
+            parent_id = current.metadata.parent_revision_id
+            current = self._load_revision_record(directory, parent_id) if parent_id else None
+        return True, records
+
+    def reachable_revision(self, project_id: str, revision_id: str) -> RevisionRecord:
+        validate_revision_id(revision_id)
+        available, records = self.reachable_revisions(project_id)
+        if not available:
+            raise RevisionNotFoundError("Revision history is unavailable for this project")
+        for record in records:
+            if record.metadata.revision_id == revision_id:
+                return record
+        raise RevisionNotFoundError("Revision does not exist")

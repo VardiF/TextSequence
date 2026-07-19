@@ -32,7 +32,8 @@ editor to apply one revision-checked batch edit.
 
 ## OpenAI ecosystem / MCP
 
-The product exposes a real Streamable HTTP MCP server with 14 tools. It can be
+The product exposes a real Streamable HTTP MCP server with 15 tools and eight
+read-only JSON Resources. It can be
 connected to compatible external clients, including Codex CLI registration.
 An optional built-in OpenAI assistant is available when configured, but core
 editing and MCP workflows require no `OPENAI_API_KEY`.
@@ -49,7 +50,7 @@ persistence deterministically.
 - Local CFR H.264/AAC media import and streaming
 - Integer-frame V1 timeline with split, trim, move, and delete
 - Render Preview and MP4 export
-- 14 MCP tools with revision-safe mutations, including canonical marker edits
+- 15 MCP tools with revision-safe mutations, including timeline querying and canonical marker edits
 - Deterministic local silence analysis and removal
 - Human and external MCP co-editing through canonical JSON
 

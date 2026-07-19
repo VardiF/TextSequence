@@ -18,6 +18,8 @@ from app.persistence.project_store import ProjectStore, StaleRevisionError
 from app.rendering.ffmpeg import RenderResult, render_plan
 from app.rendering.plan import compile_render_plan
 from app.services.timeline import timeline_projection
+from app.services.query import query_timeline
+from app.services.projections import project_summary_projection
 
 
 class ProjectService:
@@ -41,12 +43,16 @@ class ProjectService:
     def get(self, project_id: str): return self.store.load(project_id)
     def list(self): return self.store.list()
     def list_summaries(self):
-        return [{"project_id": p.id, "name": p.name, "revision": p.revision,
-                 "fps": {"numerator": p.fps.numerator, "denominator": p.fps.denominator} if p.fps else None,
-                 "revision_id": p.revision_id, "timeline_id": p.timeline.id,
-                 "clip_count": sum(len(t.clips) for t in p.timeline.tracks)}
+        return [project_summary_projection(p)
                 for p in sorted(self.store.list(), key=lambda item: (item.name, item.id))]
     def timeline(self, project_id: str): return timeline_projection(self.store.load(project_id))
+    def query_timeline(self, project_id: str, query: dict): return query_timeline(self.store.load(project_id), query)
+
+    def revision_records(self, project_id: str):
+        return self.store.reachable_revisions(project_id)
+
+    def revision_record(self, project_id: str, revision_id: str):
+        return self.store.reachable_revision(project_id, revision_id)
 
     @staticmethod
     def _analysis_output(project_id: str, revision: int, analyses: list[AssetSilenceAnalysis], minimum_silence_ms: int, noise_threshold_db: float) -> dict:

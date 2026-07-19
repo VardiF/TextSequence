@@ -15,7 +15,7 @@ The MCP endpoint remains available without `OPENAI_API_KEY`.
 
 ## Available tools
 
-The current server exposes exactly these 14 tools:
+The current server exposes exactly these 15 tools:
 
 ### `list_projects()`
 
@@ -105,6 +105,41 @@ returns safe render metadata and an application URL.
 
 Exports the current revision through the same renderer and returns safe render
 metadata and an application URL.
+
+### `query_timeline(project_id, query)`
+
+Returns safe clip and marker projections matching the typed query. Use
+`entity_types` with one or both of `clip` and `marker`, and at least one
+substantive predicate such as `frame`, `frame_range`, `asset_id`, `marker_type`,
+`shot_id`, `dialogue_line_id`, or `external_ref`. `frame` and `frame_range` are
+mutually exclusive. Clips match a containing frame or overlapping half-open
+range; markers use their point or half-open range semantics. Results are
+deterministically ordered and contain no source filesystem paths.
+
+## Read-only Resources
+
+The server exposes exactly eight read-only JSON Resources:
+
+- `textsequence://projects`
+- `textsequence://projects/{project_id}`
+- `textsequence://projects/{project_id}/timeline`
+- `textsequence://projects/{project_id}/assets/{asset_id}`
+- `textsequence://projects/{project_id}/clips/{clip_id}`
+- `textsequence://projects/{project_id}/markers/{marker_id}`
+- `textsequence://projects/{project_id}/revisions`
+- `textsequence://projects/{project_id}/revisions/{revision_id}`
+
+Each returns a safe JSON envelope with a resource type, canonical URI, state
+metadata, and data projection. Revision resources expose only snapshots
+reachable from current HEAD; legacy flat projects report unavailable history
+until a normal mutation promotes them. Resource URIs must be exact and may not
+contain query strings, fragments, trailing slashes, traversal segments, or
+encoded separators.
+
+The equivalent REST read routes are `GET /api/projects/{project_id}/timeline`,
+`POST /api/projects/{project_id}/timeline/query`,
+`GET /api/projects/{project_id}/revisions`, and
+`GET /api/projects/{project_id}/revisions/{revision_id}`.
 
 ## Recommended client workflow
 

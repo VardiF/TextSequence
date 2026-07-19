@@ -9,6 +9,8 @@ from app.agent.context import EditorContextError
 from app.audio.silence import SilenceAnalysisError
 from app.domain.models import TimelineConflictError, ValidationError
 from app.persistence.project_store import StaleRevisionError
+from app.mcp_contracts import McpResult, ProjectSummaryOutput, QueryOutput
+from app.mcp_resources import register_resources
 
 mcp = FastMCP("TextSequence", instructions="Local-first TextSequence project collaboration.", streamable_http_path="/")
 
@@ -22,7 +24,15 @@ def _error(exc: Exception) -> dict[str, Any]:
     elif isinstance(exc, ValidationError) and "Marker does not exist" in str(exc): code = "MARKER_NOT_FOUND"
     elif isinstance(exc, ValidationError) and "no changes" in str(exc).lower(): code = "NO_CHANGES"
     else: code = "INVALID_ARGUMENT"
-    result = {"ok": False, "error": {"code": code, "message": str(exc)}}
+    messages = {
+        "PROJECT_NOT_FOUND": "Project does not exist",
+        "CLIP_NOT_FOUND": "Clip does not exist",
+        "MARKER_NOT_FOUND": "Marker does not exist",
+        "STALE_REVISION": "Project revision is stale",
+        "TIMELINE_CONFLICT": "Timeline operation conflicts with an existing clip",
+        "NO_CHANGES": "The requested operation would not change the project",
+    }
+    result = {"ok": False, "error": {"code": code, "message": messages.get(code, "Invalid argument")}}
     if isinstance(exc, StaleRevisionError) and exc.current_revision is not None:
         result["error"]["current_revision"] = exc.current_revision
     return result
@@ -38,35 +48,35 @@ def _mutation(fn, *args):
         return _error(exc)
 
 
-@mcp.tool()
-def list_projects() -> list[dict[str, Any]]:
+@mcp.tool(structured_output=True)
+def list_projects() -> list[ProjectSummaryOutput]:
     return application.projects.list_summaries()
 
 
-@mcp.tool()
-def get_timeline(project_id: str) -> dict[str, Any]:
+@mcp.tool(structured_output=True)
+def get_timeline(project_id: str) -> McpResult:
     try: return application.projects.timeline(project_id)
     except Exception as exc: return _error(exc)
 
 
-@mcp.tool()
-def get_editor_context(editor_session_id: str) -> dict[str, Any]:
+@mcp.tool(structured_output=True)
+def get_editor_context(editor_session_id: str) -> McpResult:
     try:
         return {"ok": True, "context": application.editor_contexts.get(editor_session_id)}
     except EditorContextError as exc:
         return {"ok": False, "error": {"code": exc.code, "message": str(exc)}}
 
 
-@mcp.tool()
-def analyze_silence(project_id: str, minimum_silence_ms: int = 700, noise_threshold_db: float = -35) -> dict[str, Any]:
+@mcp.tool(structured_output=True)
+def analyze_silence(project_id: str, minimum_silence_ms: int = 700, noise_threshold_db: float = -35) -> McpResult:
     try:
         return {"ok": True, **application.projects.analyze_silence(project_id, minimum_silence_ms, noise_threshold_db)}
     except Exception as exc: return _error(exc)
 
 
-@mcp.tool()
+@mcp.tool(structured_output=True)
 def remove_silence(project_id: str, expected_revision: int, minimum_silence_ms: int = 700,
-                  noise_threshold_db: float = -35, keep_padding_ms: int = 0) -> dict[str, Any]:
+                  noise_threshold_db: float = -35, keep_padding_ms: int = 0) -> McpResult:
     try:
         result = application.projects.remove_silence(project_id, expected_revision, minimum_silence_ms,
                                                       noise_threshold_db, keep_padding_ms, origin="mcp", actor={"type": "agent"})
@@ -74,18 +84,18 @@ def remove_silence(project_id: str, expected_revision: int, minimum_silence_ms: 
     except Exception as exc: return _error(exc)
 
 
-@mcp.tool()
-def split_clip(project_id: str, clip_id: str, timeline_frame: int, expected_revision: int) -> dict[str, Any]:
+@mcp.tool(structured_output=True)
+def split_clip(project_id: str, clip_id: str, timeline_frame: int, expected_revision: int) -> McpResult:
     return _mutation(lambda *args: application.projects.split(*args, origin="mcp", actor={"type": "agent"}), project_id, clip_id, timeline_frame, expected_revision)
 
 
-@mcp.tool()
-def delete_clip(project_id: str, clip_id: str, expected_revision: int) -> dict[str, Any]:
+@mcp.tool(structured_output=True)
+def delete_clip(project_id: str, clip_id: str, expected_revision: int) -> McpResult:
     return _mutation(lambda *args: application.projects.delete(*args, origin="mcp", actor={"type": "agent"}), project_id, clip_id, expected_revision)
 
 
-@mcp.tool()
-def move_clip(project_id: str, clip_id: str, expected_revision: int, destination: dict[str, Any]) -> dict[str, Any]:
+@mcp.tool(structured_output=True)
+def move_clip(project_id: str, clip_id: str, expected_revision: int, destination: dict[str, Any]) -> McpResult:
     try:
         kind = destination.get("kind")
         if kind == "timeline_frame": result = application.projects.move(project_id, clip_id, int(destination["timeline_start_frame"]), expected_revision, origin="mcp", actor={"type": "agent"})
@@ -96,15 +106,15 @@ def move_clip(project_id: str, clip_id: str, expected_revision: int, destination
     except Exception as exc: return _error(exc)
 
 
-@mcp.tool()
-def trim_clip(project_id: str, clip_id: str, expected_revision: int, edge: str, frames_to_remove: int) -> dict[str, Any]:
+@mcp.tool(structured_output=True)
+def trim_clip(project_id: str, clip_id: str, expected_revision: int, edge: str, frames_to_remove: int) -> McpResult:
     return _mutation(lambda *args: application.projects.trim_relative(*args, origin="mcp", actor={"type": "agent"}), project_id, clip_id, expected_revision, edge, frames_to_remove)
 
 
-@mcp.tool()
+@mcp.tool(structured_output=True)
 def add_marker(project_id: str, expected_revision: int, start_frame: int, name: str,
                end_frame: int | None = None, description: str = "", type: str = "generic",
-               production: dict[str, Any] | None = None) -> dict[str, Any]:
+               production: dict[str, Any] | None = None) -> McpResult:
     try:
         before = application.projects.get(project_id)
         result = application.projects.add_marker(project_id, expected_revision, start_frame, end_frame, name,
@@ -119,8 +129,8 @@ def add_marker(project_id: str, expected_revision: int, start_frame: int, name: 
         return _error(exc)
 
 
-@mcp.tool()
-def update_marker(project_id: str, marker_id: str, expected_revision: int, changes: dict[str, Any]) -> dict[str, Any]:
+@mcp.tool(structured_output=True)
+def update_marker(project_id: str, marker_id: str, expected_revision: int, changes: dict[str, Any]) -> McpResult:
     try:
         result = application.projects.update_marker(project_id, expected_revision, marker_id, changes,
                                                      origin="mcp", actor={"type": "agent"})
@@ -132,8 +142,8 @@ def update_marker(project_id: str, marker_id: str, expected_revision: int, chang
         return _error(exc)
 
 
-@mcp.tool()
-def delete_marker(project_id: str, marker_id: str, expected_revision: int) -> dict[str, Any]:
+@mcp.tool(structured_output=True)
+def delete_marker(project_id: str, marker_id: str, expected_revision: int) -> McpResult:
     try:
         result = application.projects.delete_marker(project_id, expected_revision, marker_id,
                                                      origin="mcp", actor={"type": "agent"})
@@ -153,11 +163,22 @@ def _render(fn, project_id: str, expected_revision: int) -> dict[str, Any]:
     except Exception as exc: return _error(exc)
 
 
-@mcp.tool()
-def render_preview(project_id: str, expected_revision: int) -> dict[str, Any]:
+@mcp.tool(structured_output=True)
+def render_preview(project_id: str, expected_revision: int) -> McpResult:
     return _render(application.projects.render_preview, project_id, expected_revision)
 
 
-@mcp.tool()
-def export_project(project_id: str, expected_revision: int) -> dict[str, Any]:
+@mcp.tool(structured_output=True)
+def export_project(project_id: str, expected_revision: int) -> McpResult:
     return _render(application.projects.export_project, project_id, expected_revision)
+
+
+@mcp.tool(structured_output=True)
+def query_timeline(project_id: str, query: dict[str, Any]) -> QueryOutput | McpResult:
+    try:
+        return application.projects.query_timeline(project_id, query)
+    except Exception as exc:
+        return _error(exc)
+
+
+register_resources(mcp)
