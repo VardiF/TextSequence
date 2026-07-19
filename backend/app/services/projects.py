@@ -24,6 +24,7 @@ from app.services.revision_diff import (RevisionDiffError, RevisionDiffIntegrity
                                         RevisionHistoryUnavailableError, diff_projects, summarize_changes)
 from app.revision_diff_models import RevisionDiffMetadata, RevisionDiffResult
 from app.services.projections import revision_metadata_projection
+from app.services.transactions import TransactionService
 
 
 class ProjectService:
@@ -34,6 +35,7 @@ class ProjectService:
         self.media_root = media_root or Path("media")
         self._locks: dict[str, RLock] = {}
         self._locks_guard = Lock()
+        self.transactions = TransactionService(self)
 
     def _project_lock(self, project_id: str) -> RLock:
         self.store.path_for(project_id)
@@ -51,6 +53,12 @@ class ProjectService:
                 for p in sorted(self.store.list(), key=lambda item: (item.name, item.id))]
     def timeline(self, project_id: str): return timeline_projection(self.store.load(project_id))
     def query_timeline(self, project_id: str, query: dict): return query_timeline(self.store.load(project_id), query)
+
+    def prepare_transaction(self, project_id: str, request):
+        return self.transactions.prepare(project_id, request)
+
+    def commit_transaction(self, project_id: str, request, *, origin="rest", actor=None):
+        return self.transactions.commit(project_id, request, origin=origin, actor=actor or {"type": "human"})
 
     def revision_records(self, project_id: str):
         return self.store.reachable_revisions(project_id)

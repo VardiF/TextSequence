@@ -29,7 +29,7 @@ def test_mcp_tool_discovery_contains_v023_surface():
         "trim_clip", "render_preview", "export_project", "analyze_silence", "remove_silence",
             "add_marker", "update_marker", "delete_marker",
             "query_timeline",
-            "diff_revisions",
+        "diff_revisions", "prepare_transaction", "commit_transaction",
         }
 
 

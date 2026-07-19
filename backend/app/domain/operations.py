@@ -118,7 +118,7 @@ def _apply_edit(project: Project, edit: Callable[[Project], None]) -> Project:
     return edited
 
 
-def split_clip(project: Project, clip_id: str, timeline_frame: int) -> Project:
+def split_clip(project: Project, clip_id: str, timeline_frame: int, new_clip_id: Optional[str] = None) -> Project:
     def edit(edited: Project) -> None:
         track, clip = _find_clip(edited, clip_id)
         clip_end = clip.timeline_start_frame + clip.duration_frames
@@ -128,7 +128,7 @@ def split_clip(project: Project, clip_id: str, timeline_frame: int) -> Project:
         original_out = clip.source_out_frame
         clip.source_out_frame = source_split
         track.clips.append(Clip(
-            id=f"clip_{uuid4().hex}",
+            id=new_clip_id or f"clip_{uuid4().hex}",
             asset_id=clip.asset_id,
             source_in_frame=source_split,
             source_out_frame=original_out,

@@ -30,13 +30,13 @@ Suggested recording assets:
 
 ## Features
 
-Implemented in v0.2.3:
+Implemented in v0.3.0:
 
 - local MP4 import and media streaming;
 - canonical integer-frame V1 timeline with stable IDs;
 - clip selection, split, trim, move, and delete;
 - Render Preview and MP4 export through local FFmpeg;
-- real Streamable HTTP MCP server with 16 tools, including timeline querying, deterministic revision diffs, and marker mutations;
+- real Streamable HTTP MCP server with 18 tools, including timeline querying, deterministic revision diffs, marker mutations, and stateless transactions;
 - eight read-only MCP Resources plus safe REST timeline/query/revision/diff reads;
 - canonical point and range timeline markers with deterministic ordering;
 - revision-safe human and external-agent co-editing;
@@ -106,7 +106,7 @@ external references.
 The deliberate Node choice is Node 18 + Vite 6: this pinned configuration is
 stable and the production build passes; upgrading Node is not needed for this
 release. The backend remains compatible with the existing Node 18 frontend
-toolchain; no Node upgrade is required for v0.2.3.
+toolchain; no Node upgrade is required for v0.3.0.
 
 ## Canonical project and revisions
 
@@ -145,7 +145,7 @@ revision and stable IDs, mutate with `expected_revision`, then inspect again.
 
 ## Available MCP tools
 
-The server exposes exactly 16 tools:
+The server exposes exactly 18 tools:
 
 1. `list_projects`
 2. `get_timeline`
@@ -163,6 +163,8 @@ The server exposes exactly 16 tools:
 14. `delete_marker`
 15. `query_timeline`
 16. `diff_revisions`
+17. `prepare_transaction`
+18. `commit_transaction`
 
 The server also exposes eight read-only JSON Resources: the project collection,
 current project, current timeline, asset, clip, marker, revision collection,
@@ -176,6 +178,22 @@ asset source-location changes are represented only by a redacted field marker.
 
 See [docs/mcp-clients.md](docs/mcp-clients.md) for parameters and response
 contracts.
+
+### Stateless transactions
+
+`prepare_transaction(project_id, expected_revision, operations)` validates and
+executes an ordered batch in memory. It returns a deterministic prepared
+transaction, generated IDs, operation results, a SHA-256 `transaction_hash`,
+and a dry-run `diff`; it performs no writes and does not reserve a revision.
+The seven supported operations are `split_clip`, `move_clip`, `trim_clip`,
+`delete_clip`, `add_marker`, `update_marker`, and `delete_marker`. Creation
+operations can bind their generated entity with `result_ref` for later ordered
+operations. `commit_transaction` requires the exact base revision and
+revision ID, re-executes the prepared operations under the project lock, and
+persists exactly one normal `transaction` revision. Preparation and commit
+produce equivalent diffs, and stale bases require a fresh inspection; the
+hash is an integrity check, not authentication. Net-zero batches, invalid
+operations, and operation failures are rejected without canonical changes.
 
 ## Example MCP workflow
 
