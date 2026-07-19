@@ -30,13 +30,14 @@ Suggested recording assets:
 
 ## Features
 
-Implemented in v0.2.1:
+Implemented in v0.2.2:
 
 - local MP4 import and media streaming;
 - canonical integer-frame V1 timeline with stable IDs;
 - clip selection, split, trim, move, and delete;
 - Render Preview and MP4 export through local FFmpeg;
-- real Streamable HTTP MCP server with 14 tools, including marker mutations;
+- real Streamable HTTP MCP server with 15 tools, including timeline querying and marker mutations;
+- eight read-only MCP Resources plus safe REST timeline/query/revision reads;
 - canonical point and range timeline markers with deterministic ordering;
 - revision-safe human and external-agent co-editing;
 - schema-v2 canonical projects with explicit Timeline identity;
@@ -105,7 +106,7 @@ external references.
 The deliberate Node choice is Node 18 + Vite 6: this pinned configuration is
 stable and the production build passes; upgrading Node is not needed for this
 release. The backend remains compatible with the existing Node 18 frontend
-toolchain; no Node upgrade is required for v0.2.0.
+toolchain; no Node upgrade is required for v0.2.2.
 
 ## Canonical project and revisions
 
@@ -144,7 +145,7 @@ revision and stable IDs, mutate with `expected_revision`, then inspect again.
 
 ## Available MCP tools
 
-The server exposes exactly 14 tools:
+The server exposes exactly 15 tools:
 
 1. `list_projects`
 2. `get_timeline`
@@ -160,6 +161,12 @@ The server exposes exactly 14 tools:
 12. `add_marker`
 13. `update_marker`
 14. `delete_marker`
+15. `query_timeline`
+
+The server also exposes eight read-only JSON Resources: the project collection,
+current project, current timeline, asset, clip, marker, revision collection,
+and reachable revision projections. Resource reads expose safe projections and
+never expose source paths or raw revision snapshots.
 
 See [docs/mcp-clients.md](docs/mcp-clients.md) for parameters and response
 contracts.

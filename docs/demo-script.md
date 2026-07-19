@@ -18,7 +18,7 @@ edit.” Split the clip and show the selected state and playhead.
 **25–40 seconds — MCP connection**
 
 “The Agent Connections panel shows the local Streamable HTTP MCP endpoint and
-14 available tools. An external MCP client calls `get_timeline`; it sees the
+15 available tools. An external MCP client calls `get_timeline`; it sees the
 same project revision and clip IDs shown in the editor.”
 
 **40–60 seconds — analyze and remove silence**
