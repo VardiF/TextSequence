@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import os
 from pathlib import Path
+import re
 from threading import Lock, RLock
 from typing import Optional
+from uuid import uuid4
 
 from app.domain.models import ValidationError
 from app.domain.silence import SourceRemovalRange, apply_silence_removals
@@ -18,9 +21,11 @@ from app.services.timeline import timeline_projection
 
 
 class ProjectService:
-    def __init__(self, store: Optional[ProjectStore] = None, runtime_root: Optional[Path] = None) -> None:
+    def __init__(self, store: Optional[ProjectStore] = None, runtime_root: Optional[Path] = None,
+                 media_root: Optional[Path] = None) -> None:
         self.store = store or ProjectStore()
         self.runtime_root = runtime_root or Path("runtime")
+        self.media_root = media_root or Path("media")
         self._locks: dict[str, RLock] = {}
         self._locks_guard = Lock()
 
@@ -109,6 +114,50 @@ class ProjectService:
         asset = probe_media(path)
         return self._commit_operation(project_id, None, lambda project: register_asset(project, asset), origin, actor,
                                       "import_media", f"Import media {asset.name}")
+
+    @staticmethod
+    def _safe_upload_name(filename: Optional[str]) -> str:
+        raw = (filename or "video").replace("\\", "/")
+        basename = raw.rsplit("/", 1)[-1]
+        basename = re.sub(r"[^A-Za-z0-9._ -]+", "_", basename).strip(" .")
+        return basename[:180] or "video"
+
+    async def import_uploaded_media(self, project_id: str, upload, expected_revision: int,
+                                    origin: str = "rest", actor: Optional[dict[str, str]] = None):
+        # Validate the project before creating any managed media directory.
+        self.store.load(project_id)
+        safe_name = self._safe_upload_name(getattr(upload, "filename", None))
+        project_root = self.media_root / project_id
+        self.store.path_for(project_id)
+        project_root.mkdir(parents=True, exist_ok=True)
+        token = uuid4().hex
+        temporary = project_root / f".upload-{token}.part"
+        destination = project_root / f"{token}_{safe_name}"
+        try:
+            with temporary.open("wb") as handle:
+                while True:
+                    chunk = await upload.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    handle.write(chunk)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, destination)
+            asset = probe_media(str(destination), display_name=safe_name)
+            return self._commit_operation(project_id, expected_revision,
+                lambda project: register_asset(project, asset), origin, actor,
+                "import_media", f"Import media {asset.name}")
+        except Exception:
+            for path in (temporary, destination):
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
+            raise
+        finally:
+            close = getattr(upload, "close", None)
+            if close is not None:
+                await close()
 
     def _commit_operation(self, project_id: str, expected_revision: Optional[int], operation, origin: str,
                           actor: Optional[dict[str, str]], operation_name: str, summary: str):

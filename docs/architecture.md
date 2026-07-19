@@ -36,6 +36,11 @@ flowchart TD
   safe projections and never exposes source paths through timeline inspection.
 - **FFmpeg Render Plan:** compiles canonical clips and gaps into a deterministic
   local FFmpeg command for preview or export.
+- **Managed Browser Media:** multipart uploads are written atomically under the
+  ignored local `media/{project_id}` root, probed, and then imported through the
+  same revision-checked service path. Failed probes or stale commits remove the
+  managed copy where possible; path imports remain an advanced external-
+  reference fallback.
 - **Silence Analyzer:** runs local `ffprobe`/FFmpeg `silencedetect`, converts
   timestamps to integer frames, and separates read-only analysis from the
   revision-checked batch mutation.

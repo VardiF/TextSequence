@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -172,6 +172,20 @@ def import_media(project_id: str, request: ImportMedia):
         raise HTTPException(400, str(exc)) from exc
     except StaleRevisionError as exc:
         raise HTTPException(409, str(exc)) from exc
+
+
+@router.post("/projects/{project_id}/assets/upload")
+async def upload_media(project_id: str, file: UploadFile = File(...), expected_revision: int = Form(...)):
+    try:
+        project = await service.import_uploaded_media(project_id, file, expected_revision,
+                                                       origin="rest", actor={"type": "human"})
+        return _rest_project(project)
+    except StaleRevisionError as exc:
+        raise HTTPException(409, {"code": "STALE_REVISION", "message": str(exc),
+                                  "current_revision": exc.current_revision}) from exc
+    except (FileNotFoundError, ProbeError, ValidationError) as exc:
+        raise HTTPException(400, {"code": getattr(exc, "code", "INVALID_ARGUMENT"),
+                                  "message": str(exc)}) from exc
 
 
 def _mutation_error(exc: Exception) -> HTTPException:

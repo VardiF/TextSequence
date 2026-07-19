@@ -94,7 +94,12 @@ make frontend
 
 Open `http://127.0.0.1:5173`. The backend API is at
 `http://127.0.0.1:8000`. Projects and runtime renders remain local and are
-ignored by Git. Imported media is external and is never modified.
+ignored by Git. Imported media is external and is never modified. Browser-
+selected uploads are copied into the ignored local `media/{project_id}`
+directory before probing and import. The original filename is retained as
+asset display metadata, while the stored filename is sanitized and unique.
+Path-based import remains available as an advanced option for deliberate
+external references.
 
 The deliberate Node choice is Node 18 + Vite 6: this pinned configuration is
 stable and the production build passes; upgrading Node is not needed for this

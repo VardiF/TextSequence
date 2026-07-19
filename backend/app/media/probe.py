@@ -26,7 +26,7 @@ def find_ffprobe() -> str | None:
     return None
 
 
-def probe_media(path: str) -> Asset:
+def probe_media(path: str, display_name: str | None = None) -> Asset:
     source = Path(path).expanduser().resolve()
     if not source.is_file():
         raise ProbeError(f"Media file does not exist: {source}")
@@ -51,4 +51,4 @@ def probe_media(path: str) -> Asset:
         raise ProbeError("Media has unsupported or incomplete video metadata") from exc
     if frames <= 0 or width <= 0 or height <= 0:
         raise ProbeError("Media has unsupported video dimensions or duration")
-    return Asset(id=f"asset_{__import__('uuid').uuid4().hex}", path=str(source), name=source.name, codec=codec, width=width, height=height, fps=FrameRate(n, d), duration_frames=frames)
+    return Asset(id=f"asset_{__import__('uuid').uuid4().hex}", path=str(source), name=display_name or source.name, codec=codec, width=width, height=height, fps=FrameRate(n, d), duration_frames=frames)
