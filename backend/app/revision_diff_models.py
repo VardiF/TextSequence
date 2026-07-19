@@ -141,23 +141,27 @@ class RevisionChanges(_StrictModel):
     markers: MarkerChanges
 
 
+class EntityTypeSummary(_StrictModel):
+    added: int
+    removed: int
+    modified: int
+
+
+class RevisionDiffByEntityType(_StrictModel):
+    assets: EntityTypeSummary
+    tracks: EntityTypeSummary
+    clips: EntityTypeSummary
+    markers: EntityTypeSummary
+
+
 class RevisionDiffSummary(_StrictModel):
-    project_fields_changed: int
-    timeline_fields_changed: int
-    assets_added: int
-    assets_removed: int
-    assets_modified: int
-    tracks_added: int
-    tracks_removed: int
-    tracks_modified: int
-    clips_added: int
-    clips_removed: int
-    clips_modified: int
-    markers_added: int
-    markers_removed: int
-    markers_modified: int
-    total_field_changes: int
-    total_entities_changed: int
+    entities_added: int
+    entities_removed: int
+    entities_modified: int
+    fields_modified: int
+    project_fields_modified: int
+    timeline_fields_modified: int
+    by_entity_type: RevisionDiffByEntityType
 
 
 class RevisionDiffMetadata(_StrictModel):

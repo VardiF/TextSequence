@@ -6,13 +6,13 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError as PydanticValidationError
 
-from app.domain.models import Asset, FrameRate, ValidationError, project_to_dict
+from app.domain.models import Asset, FrameRate, project_to_dict
 from app.domain.operations import new_project, register_asset
 from app.main import app
 from app.persistence.project_store import ProjectStore, RevisionNotFoundError
 from app.revision_diff_models import RedactedFieldChange
 from app.services.projects import ProjectService
-from app.services.revision_diff import RevisionDiffError, diff_projects
+from app.services.revision_diff import RevisionDiffError
 import app.api.routes as routes
 from app.mcp_server import diff_revisions as mcp_diff_revisions, mcp
 
@@ -36,8 +36,14 @@ def test_revision_diff_is_directional_deterministic_and_same_revision_is_empty(t
     assert forward.direction == "forward"
     assert forward.project_id == project.id
     assert forward.timeline_id == project.timeline.id
-    assert forward.summary.clips_added == 1
-    assert forward.summary.clips_modified == 1
+    assert forward.summary.model_dump(mode="json") == {
+        "entities_added": 1, "entities_removed": 0, "entities_modified": 1,
+        "fields_modified": 1, "project_fields_modified": 0, "timeline_fields_modified": 0,
+        "by_entity_type": {"assets": {"added": 0, "removed": 0, "modified": 0},
+                            "tracks": {"added": 0, "removed": 0, "modified": 0},
+                            "clips": {"added": 1, "removed": 0, "modified": 1},
+                            "markers": {"added": 0, "removed": 0, "modified": 0}},
+    }
     assert forward.changes.clips.added[0].id != clip_id
     assert all("duration" not in change.path for item in forward.changes.clips.modified for change in item.fields)
 
@@ -46,11 +52,18 @@ def test_revision_diff_is_directional_deterministic_and_same_revision_is_empty(t
     assert reverse.changes.clips.removed[0].id != clip_id
     reverse_modified = next(item for item in reverse.changes.clips.modified if item.id == clip_id)
     assert next(field for field in reverse_modified.fields if field.path == "/source_out_frame").after == 100
+    assert reverse.summary.entities_added == forward.summary.entities_removed
+    assert reverse.summary.entities_removed == forward.summary.entities_added
+    assert reverse.summary.entities_modified == forward.summary.entities_modified
+    assert reverse.summary.fields_modified == forward.summary.fields_modified
 
     same = service.diff_revisions(project.id, changed.revision_id, changed.revision_id)
     assert same.direction == "same"
-    assert same.summary.total_field_changes == 0
-    assert same.summary.total_entities_changed == 0
+    assert same.summary.model_dump(mode="json") == {
+        "entities_added": 0, "entities_removed": 0, "entities_modified": 0,
+        "fields_modified": 0, "project_fields_modified": 0, "timeline_fields_modified": 0,
+        "by_entity_type": {entity: {"added": 0, "removed": 0, "modified": 0} for entity in ("assets", "tracks", "clips", "markers")},
+    }
     assert same.changes.clips.added == []
     assert same.changes.clips.removed == []
     assert same.changes.clips.modified == []
@@ -66,7 +79,9 @@ def test_path_only_asset_change_is_redacted_and_added_removed_values_are_safe(tm
     )
     diff = service.diff_revisions(project.id, original_revision, changed.revision_id)
     asset_change = diff.changes.assets.modified[0]
-    assert diff.summary.assets_modified == 1
+    assert diff.summary.entities_modified == 1
+    assert diff.summary.fields_modified == 1
+    assert diff.summary.by_entity_type.assets.modified == 1
     assert len(asset_change.fields) == 1
     assert isinstance(asset_change.fields[0], RedactedFieldChange)
     assert asset_change.fields[0].path == "/source_location"
@@ -82,6 +97,10 @@ def test_path_only_asset_change_is_redacted_and_added_removed_values_are_safe(tm
     )
     removed_diff = service.diff_revisions(project.id, changed.revision_id, removed.revision_id)
     assert removed_diff.changes.assets.removed[0].id == "asset"
+    assert removed_diff.summary.entities_removed == 2
+    assert removed_diff.summary.fields_modified == 0
+    assert removed_diff.summary.by_entity_type.assets.removed == 1
+    assert removed_diff.summary.by_entity_type.clips.removed == 1
     assert "/source_location" not in json.dumps(removed_diff.model_dump(mode="json"))
     with pytest.raises(PydanticValidationError):
         RedactedFieldChange.model_validate({"path": "/source_location", "kind": "redacted", "values_redacted": True, "before": "/var/secret"})
@@ -107,6 +126,12 @@ def test_diff_compares_explicit_project_timeline_track_clip_and_marker_fields(tm
     assert {field.path for field in diff.changes.timeline.fields} == {"/name"}
     assert {field.path for field in diff.changes.tracks.modified[0].fields} == {"/name"}
     assert {field.path for field in diff.changes.clips.modified[0].fields} == {"/source_in_frame", "/production/shot_ids"}
+    assert diff.summary.project_fields_modified == 1
+    assert diff.summary.timeline_fields_modified == 1
+    assert diff.summary.fields_modified == 5
+    assert diff.summary.entities_modified == 2
+    assert diff.summary.by_entity_type.tracks.modified == 1
+    assert diff.summary.by_entity_type.clips.modified == 1
     serialized = json.dumps(diff.model_dump(mode="json"))
     assert "revision_id" not in serialized.split('"changes"', 1)[1]
     assert "timeline_end" not in serialized
@@ -183,6 +208,15 @@ def test_rest_and_mcp_diff_surfaces_return_safe_machine_readable_results(tmp_pat
     result = mcp_diff_revisions(project.id, project.revision_id, changed.revision_id)
     assert result["ok"] is True
     assert result["direction"] == "forward"
+    assert response.json()["summary"] == result["summary"]
+    assert set(result["summary"]) == {
+        "entities_added", "entities_removed", "entities_modified", "fields_modified",
+        "project_fields_modified", "timeline_fields_modified", "by_entity_type",
+    }
+    diff_tool = mcp._tool_manager.get_tool("diff_revisions")
+    legacy_content, structured = diff_tool.fn_metadata.convert_result(result)
+    assert json.loads(legacy_content[0].text)["summary"] == result["summary"]
+    assert structured["result"]["summary"] == result["summary"]
     assert len(mcp._tool_manager.list_tools()) == 16
 
 

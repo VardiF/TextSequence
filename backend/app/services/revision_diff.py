@@ -7,7 +7,8 @@ from typing import Any
 from app.domain.models import Project
 from app.revision_diff_models import (
     AssetChanges, ClipChanges, EntityModification, FieldChange, MarkerChanges,
-    ProjectChanges, RedactedFieldChange, RevisionChanges, RevisionDiffSummary,
+    EntityTypeSummary, ProjectChanges, RedactedFieldChange, RevisionChanges,
+    RevisionDiffByEntityType, RevisionDiffSummary,
     SafeAsset, SafeAssetProduction, SafeClip, SafeExternalReference, SafeFrameRate,
     SafeMarker, SafeProduction, SafeTrack, TimelineChanges, TrackChanges,
     ValueFieldChange,
@@ -160,14 +161,20 @@ def _marker_maps(project: Project):
 
 def summarize_changes(changes: RevisionChanges) -> RevisionDiffSummary:
     entity_groups = (changes.assets, changes.tracks, changes.clips, changes.markers)
+    by_entity_type = RevisionDiffByEntityType(
+        assets=EntityTypeSummary(added=len(changes.assets.added), removed=len(changes.assets.removed), modified=len(changes.assets.modified)),
+        tracks=EntityTypeSummary(added=len(changes.tracks.added), removed=len(changes.tracks.removed), modified=len(changes.tracks.modified)),
+        clips=EntityTypeSummary(added=len(changes.clips.added), removed=len(changes.clips.removed), modified=len(changes.clips.modified)),
+        markers=EntityTypeSummary(added=len(changes.markers.added), removed=len(changes.markers.removed), modified=len(changes.markers.modified)),
+    )
     return RevisionDiffSummary(
-        project_fields_changed=len(changes.project.fields), timeline_fields_changed=len(changes.timeline.fields),
-        assets_added=len(changes.assets.added), assets_removed=len(changes.assets.removed), assets_modified=len(changes.assets.modified),
-        tracks_added=len(changes.tracks.added), tracks_removed=len(changes.tracks.removed), tracks_modified=len(changes.tracks.modified),
-        clips_added=len(changes.clips.added), clips_removed=len(changes.clips.removed), clips_modified=len(changes.clips.modified),
-        markers_added=len(changes.markers.added), markers_removed=len(changes.markers.removed), markers_modified=len(changes.markers.modified),
-        total_field_changes=len(changes.project.fields) + len(changes.timeline.fields) + sum(len(item.fields) for group in entity_groups for item in group.modified),
-        total_entities_changed=sum(len(group.added) + len(group.removed) + len(group.modified) for group in entity_groups),
+        entities_added=sum(len(group.added) for group in entity_groups),
+        entities_removed=sum(len(group.removed) for group in entity_groups),
+        entities_modified=sum(len(group.modified) for group in entity_groups),
+        fields_modified=len(changes.project.fields) + len(changes.timeline.fields) + sum(len(item.fields) for group in entity_groups for item in group.modified),
+        project_fields_modified=len(changes.project.fields),
+        timeline_fields_modified=len(changes.timeline.fields),
+        by_entity_type=by_entity_type,
     )
 
 
