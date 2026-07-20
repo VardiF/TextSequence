@@ -13,6 +13,7 @@ from app.persistence.project_store import ProjectStore
 from app.persistence.revisions import RevisionMetadata, RevisionRecord, revision_hash
 from app.rendering.plan import compile_render_plan
 from app.services.projects import ProjectService
+from app.services.transactions import TransactionError
 
 
 def seeded(tmp_path):
@@ -97,6 +98,122 @@ def test_v2_transaction_add_track_result_ref_moves_clip(tmp_path):
     assert committed.diff == prepared.diff
     assert len(committed.timeline["tracks"][1]["clips"]) == 1
     assert committed.timeline["tracks"][1]["clips"][0]["timeline_start_frame"] == 12
+
+
+def test_v2_same_frame_cross_track_move_prepares_commits_and_matches_history_diff(tmp_path):
+    service, project = seeded(tmp_path)
+    multi = service.add_track(project.id, project.revision, "V2")
+    clip = multi.timeline.tracks[0].clips[0]
+    base_revision_id = multi.revision_id
+    target_track = multi.timeline.tracks[1]
+    request = {
+        "contract_version": 2,
+        "expected_revision": multi.revision,
+        "operations": [{
+            "op": "move_clip", "clip": {"kind": "id", "id": clip.id},
+            "timeline_start_frame": 0, "target_track_id": {"kind": "id", "id": target_track.id},
+        }],
+    }
+
+    prepared = service.prepare_transaction(multi.id, request)
+    prepared_operation = prepared.prepared_transaction.operations[0]
+    assert prepared_operation.target_track_id == target_track.id
+
+    committed = service.commit_transaction(multi.id, {
+        "transaction_hash": prepared.transaction_hash,
+        "prepared_transaction": prepared.prepared_transaction.model_dump(mode="json"),
+    })
+    historical = service.diff_revisions(multi.id, base_revision_id, committed.revision_id)
+    assert prepared.diff == committed.diff
+    assert committed.diff.summary == historical.summary
+    assert committed.diff.changes == historical.changes
+    assert committed.revision == multi.revision + 1
+    assert len(committed.timeline["tracks"]) == 2
+    assert committed.timeline["tracks"][0]["clips"] == []
+    moved_clip = committed.timeline["tracks"][1]["clips"][0]
+    assert moved_clip["id"] == clip.id
+    assert moved_clip["timeline_start_frame"] == 0
+    assert "/track_id" in {field.path for field in committed.diff.changes.clips.modified[0].fields}
+
+
+def test_v2_move_noop_rules_and_same_track_frame_move(tmp_path):
+    service, project = seeded(tmp_path)
+    multi = service.add_track(project.id, project.revision, "V2")
+    clip = multi.timeline.tracks[0].clips[0]
+    current_track = multi.timeline.tracks[0]
+
+    for target_track_id in (current_track.id, None):
+        request = {
+            "contract_version": 2,
+            "expected_revision": multi.revision,
+            "operations": [{"op": "move_clip", "clip": {"kind": "id", "id": clip.id},
+                             "timeline_start_frame": 0}],
+        }
+        if target_track_id is not None:
+            request["operations"][0]["target_track_id"] = {"kind": "id", "id": target_track_id}
+        with pytest.raises(TransactionError) as no_change:
+            service.prepare_transaction(multi.id, request)
+        assert no_change.value.code == "NO_CHANGES"
+
+    valid = service.prepare_transaction(multi.id, {
+        "contract_version": 2,
+        "expected_revision": multi.revision,
+        "operations": [{"op": "move_clip", "clip": {"kind": "id", "id": clip.id},
+                         "timeline_start_frame": 10, "target_track_id": {"kind": "id", "id": current_track.id}}],
+    })
+    assert valid.diff.changes.clips.modified[0].fields[0].path == "/timeline_start_frame"
+
+
+def test_v2_cross_track_collision_is_rejected_without_mutation(tmp_path):
+    service, project = seeded(tmp_path)
+    multi = service.add_track(project.id, project.revision, "V2")
+    first = multi.timeline.tracks[0].clips[0]
+    moved = service.move(project.id, first.id, 0, multi.revision, target_track_id=multi.timeline.tracks[1].id)
+    with_second = service._commit_operation(
+        project.id, moved.revision,
+        lambda candidate: register_asset(candidate, Asset(
+            "asset_2", "/tmp/second.mp4", "second.mp4", "h264", 320, 180, FrameRate(24, 1), 60,
+        ), timeline_start_frame=120),
+        "system", {"type": "system"}, "import_media", "Add second media",
+    )
+    second = with_second.timeline.tracks[0].clips[0]
+    request = {
+        "contract_version": 2,
+        "expected_revision": with_second.revision,
+        "operations": [{"op": "move_clip", "clip": {"kind": "id", "id": second.id},
+                         "timeline_start_frame": 0,
+                         "target_track_id": {"kind": "id", "id": with_second.timeline.tracks[1].id}}],
+    }
+    with pytest.raises(TransactionError) as collision:
+        service.prepare_transaction(project.id, request)
+    assert collision.value.cause_code == "TIMELINE_CONFLICT"
+    assert service.get(project.id).revision == with_second.revision
+
+
+def test_v2_same_frame_cross_track_move_is_guarded_at_commit(tmp_path):
+    service, project = seeded(tmp_path)
+    multi = service.add_track(project.id, project.revision, "V2")
+    clip = multi.timeline.tracks[0].clips[0]
+    request = {
+        "contract_version": 2,
+        "expected_revision": multi.revision,
+        "operations": [{"op": "move_clip", "clip": {"kind": "id", "id": clip.id},
+                         "timeline_start_frame": 0,
+                         "target_track_id": {"kind": "id", "id": multi.timeline.tracks[1].id}}],
+    }
+    prepared = service.prepare_transaction(project.id, request)
+    guard = service.guards.acquire(project.id, {"type": "agent", "id": "reviewer"},
+                                   {"kind": "selection", "clip_ids": [clip.id], "marker_ids": [], "frame_ranges": []})
+    payload = {"transaction_hash": prepared.transaction_hash,
+               "prepared_transaction": prepared.prepared_transaction.model_dump(mode="json")}
+    with pytest.raises(TransactionError) as blocked:
+        service.commit_transaction(project.id, payload)
+    assert blocked.value.code == "GUARD_CONFLICT"
+    assert service.get(project.id).revision == multi.revision
+    committed = service.commit_transaction(project.id, {**payload, "guard_tokens": [guard["guard_token"]]})
+    assert committed.status == "committed"
+    assert committed.revision == multi.revision + 1
+    assert committed.timeline["tracks"][1]["clips"][0]["id"] == clip.id
 
 
 def test_render_plan_uses_persisted_canvas_and_global_layer_duration(tmp_path):

@@ -306,7 +306,17 @@ def _execute(project: "Project", operations: list[Any]) -> tuple["Project", list
                 if clip is None:
                     raise ValidationError("Clip does not exist")
                 if clip.timeline_start_frame == operation.timeline_start_frame:
-                    raise ValidationError("Move produced no changes")
+                    if isinstance(operation, ResolvedMoveOperationV2):
+                        current_track_id = next(
+                            track.id
+                            for track in candidate.timeline.tracks
+                            if any(item.id == operation.clip_id for item in track.clips)
+                        )
+                        effective_target_track_id = operation.target_track_id or current_track_id
+                        if effective_target_track_id == current_track_id:
+                            raise ValidationError("Move produced no changes")
+                    elif isinstance(operation, ResolvedMoveOperation):
+                        raise ValidationError("Move produced no changes")
                 candidate = move_clip(candidate, operation.clip_id, operation.timeline_start_frame,
                                       getattr(operation, "target_track_id", None))
                 result = OperationResult(operation_index=index, op=operation.op, affected_ids=[operation.clip_id])
