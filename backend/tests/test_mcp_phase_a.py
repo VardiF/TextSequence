@@ -29,9 +29,10 @@ def test_mcp_tool_discovery_contains_v040_surface():
         "trim_clip", "render_preview", "export_project", "analyze_silence", "remove_silence",
             "add_marker", "update_marker", "delete_marker",
             "query_timeline",
-            "diff_revisions", "prepare_transaction", "commit_transaction", "restore_revision",
-            "acquire_edit_guard", "renew_edit_guard", "release_edit_guard", "list_edit_guards",
-            }
+                "diff_revisions", "prepare_transaction", "commit_transaction", "restore_revision",
+                "acquire_edit_guard", "renew_edit_guard", "release_edit_guard", "list_edit_guards",
+                "add_track", "update_track", "delete_track", "reorder_track",
+                }
 
 
 def test_editor_context_is_validated_against_authoritative_project(tmp_path):

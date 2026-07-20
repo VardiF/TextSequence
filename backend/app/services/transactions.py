@@ -18,7 +18,9 @@ from app.domain.models import (
     ExternalReference, Marker, MarkerProductionMetadata, TimelineConflictError,
     ValidationError, project_to_dict,
 )
-from app.domain.operations import add_marker, delete_clip, delete_marker, move_clip, split_clip, trim_clip, update_marker
+from app.domain.operations import (add_marker, add_track as add_track_domain, delete_clip, delete_marker,
+                                    delete_track as delete_track_domain, move_clip, reorder_track as reorder_track_domain,
+                                    split_clip, trim_clip, update_marker, update_track as update_track_domain)
 from app.persistence.project_store import StaleRevisionError
 from app.services.revision_diff import diff_projects, summarize_changes
 from app.services.timeline import timeline_projection
@@ -31,6 +33,12 @@ from app.transaction_models import (
     ResolvedDeleteClipOperation, ResolvedDeleteMarkerOperation, ResolvedMoveOperation,
     ResolvedSplitOperation, ResolvedTrimOperation, ResolvedUpdateMarkerOperation,
     ResultReference, SplitOperation, TrimOperation, UpdateMarkerOperation,
+    AddTrackOperation, CommitTransactionOutputV2, CommitTransactionRequestV2,
+    DeleteTrackOperation, MoveOperationV2, PrepareTransactionOutputV2,
+    PrepareTransactionRequestV2, PreparedOperationV2, PreparedTransactionV2,
+    RawOperationV2, ReorderTrackOperation, ResolvedAddTrackOperation,
+    ResolvedDeleteTrackOperation, ResolvedMoveOperationV2, ResolvedReorderTrackOperation,
+    ResolvedUpdateTrackOperation, UpdateTrackOperation,
 )
 
 if TYPE_CHECKING:
@@ -68,7 +76,7 @@ def _canonical(value: Any) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
 
 
-def transaction_hash(prepared: PreparedTransaction) -> str:
+def transaction_hash(prepared: Any) -> str:
     payload = prepared.model_dump(mode="json")
     return hashlib.sha256(_canonical(payload)).hexdigest()
 
@@ -97,6 +105,10 @@ def _find_clip(project: "Project", clip_id: str):
 
 def _find_marker(project: "Project", marker_id: str):
     return next((marker for marker in project.timeline.markers if marker.id == marker_id), None)
+
+
+def _find_track(project: "Project", track_id: str):
+    return next((track for track in project.timeline.tracks if track.id == track_id), None)
 
 
 def _marker_production(value: MarkerProduction) -> MarkerProductionMetadata:
@@ -129,9 +141,9 @@ def _resolve_ref(project: "Project", ref: EntityReference, expected: str,
         return binding[1]
     if not _safe_id(ref.id):
         raise TransactionError("INVALID_TRANSACTION", "Entity reference is malformed", cause_code="MALFORMED_ID")
-    found = _find_clip(project, ref.id) if expected == "clip" else _find_marker(project, ref.id)
+    found = _find_clip(project, ref.id) if expected == "clip" else _find_marker(project, ref.id) if expected == "marker" else _find_track(project, ref.id)
     if found is None:
-        cause = "CLIP_NOT_FOUND" if expected == "clip" else "MARKER_NOT_FOUND"
+        cause = "CLIP_NOT_FOUND" if expected == "clip" else "MARKER_NOT_FOUND" if expected == "marker" else "TRACK_NOT_FOUND"
         raise TransactionError("INVALID_TRANSACTION", "Referenced entity does not exist", cause_code=cause)
     return ref.id
 
@@ -156,11 +168,27 @@ def _generated_id(project: "Project", raw: RawOperation, index: int, entity: str
     raise TransactionError("INVALID_TRANSACTION", "Unable to allocate a deterministic entity ID", cause_code="ID_COLLISION")
 
 
-def _resolve_operations(project: "Project", operations: list[RawOperation]) -> list[PreparedOperation]:
-    bindings: dict[str, tuple[str, str]] = {}
-    used = _entity_ids(project)
+def _generated_id_v2(project: "Project", raw: Any, index: int, entity: str, used: set[str]) -> str:
+    normalized = raw.model_dump(mode="json")
+    for counter in range(1000):
+        seed = _canonical({"domain": "textsequence.transaction.generated-id.v2.track" if entity == "track" else "textsequence.transaction.generated-id.v2",
+                           "contract_version": 2, "project_id": project.id, "base_revision": project.revision,
+                           "base_revision_id": project.revision_id, "operation": normalized,
+                           "operation_index": index, "entity_type": entity, "collision_counter": counter})
+        candidate = f"{entity}_{hashlib.sha256(seed).hexdigest()[:32]}"
+        if candidate not in used:
+            return candidate
+    raise TransactionError("INVALID_TRANSACTION", "Unable to allocate a deterministic entity ID", cause_code="ID_COLLISION")
+
+
+def _resolve_operations(project: "Project", operations: list[RawOperation], *,
+                        bindings: dict[str, tuple[str, str]] | None = None,
+                        used: set[str] | None = None, index_offset: int = 0) -> list[PreparedOperation]:
+    bindings = bindings if bindings is not None else {}
+    used = used if used is not None else _entity_ids(project)
     resolved: list[PreparedOperation] = []
-    for index, raw in enumerate(operations):
+    for local_index, raw in enumerate(operations):
+        index = index_offset + local_index
         try:
             if isinstance(raw, SplitOperation):
                 if raw.result_ref in bindings:
@@ -207,6 +235,44 @@ def _resolve_operations(project: "Project", operations: list[RawOperation]) -> l
     return resolved
 
 
+def _resolve_operations_v2(project: "Project", operations: list[RawOperationV2]) -> list[PreparedOperationV2]:
+    bindings: dict[str, tuple[str, str]] = {}
+    used = _entity_ids(project)
+    resolved: list[PreparedOperationV2] = []
+    for index, raw in enumerate(operations):
+        try:
+            if isinstance(raw, AddTrackOperation):
+                if raw.result_ref in bindings:
+                    raise TransactionError("INVALID_TRANSACTION", "Transaction result reference is duplicated", cause_code="DUPLICATE_RESULT_REF")
+                track_id = _generated_id_v2(project, raw, index, "track", used)
+                used.add(track_id)
+                bindings[raw.result_ref] = ("track", track_id)
+                resolved.append(ResolvedAddTrackOperation(op=raw.op, result_ref=raw.result_ref, track_id=track_id,
+                                                          name=raw.name, position=raw.position, external_refs=raw.external_refs))
+            elif isinstance(raw, MoveOperationV2):
+                target = None if raw.target_track_id is None else _resolve_ref(project, raw.target_track_id, "track", bindings)
+                resolved.append(ResolvedMoveOperationV2(op=raw.op, clip_id=_resolve_ref(project, raw.clip, "clip", bindings),
+                                                        timeline_start_frame=raw.timeline_start_frame, target_track_id=target))
+            elif isinstance(raw, UpdateTrackOperation):
+                resolved.append(ResolvedUpdateTrackOperation(op=raw.op, track_id=_resolve_ref(project, raw.track, "track", bindings),
+                                                             name=raw.name, external_refs=raw.external_refs))
+            elif isinstance(raw, DeleteTrackOperation):
+                resolved.append(ResolvedDeleteTrackOperation(op=raw.op, track_id=_resolve_ref(project, raw.track, "track", bindings)))
+            elif isinstance(raw, ReorderTrackOperation):
+                resolved.append(ResolvedReorderTrackOperation(op=raw.op, track_id=_resolve_ref(project, raw.track, "track", bindings), position=raw.position))
+            else:
+                # The seven v1 operations retain their exact semantics inside v2.
+                resolved.extend(_resolve_operations(project, [raw], bindings=bindings, used=used, index_offset=index))
+        except TransactionError as exc:
+            if exc.operation_index is None:
+                raise TransactionError(exc.code, exc.message, operation_index=index, operation=raw.op, cause_code=exc.cause_code) from exc
+            raise
+        except (ValidationError, ValueError) as exc:
+            raise TransactionError("INVALID_TRANSACTION", "Transaction operation is invalid", operation_index=index,
+                                   operation=raw.op, cause_code="INVALID_OPERATION") from exc
+    return resolved
+
+
 def _failure(index: int, op: str, exc: Exception) -> TransactionError:
     if isinstance(exc, TimelineConflictError):
         cause = "TIMELINE_CONFLICT"
@@ -225,7 +291,7 @@ def _failure(index: int, op: str, exc: Exception) -> TransactionError:
                            operation=op, cause_code=cause)
 
 
-def _execute(project: "Project", operations: list[PreparedOperation]) -> tuple["Project", list[OperationResult]]:
+def _execute(project: "Project", operations: list[Any]) -> tuple["Project", list[OperationResult]]:
     candidate = project
     results: list[OperationResult] = []
     for index, operation in enumerate(operations):
@@ -235,13 +301,24 @@ def _execute(project: "Project", operations: list[PreparedOperation]) -> tuple["
                 result = OperationResult(operation_index=index, op=operation.op,
                                          affected_ids=[operation.clip_id, operation.new_clip_id],
                                          created_ids=[operation.new_clip_id], result_ref=operation.result_ref)
-            elif isinstance(operation, ResolvedMoveOperation):
+            elif isinstance(operation, (ResolvedMoveOperation, ResolvedMoveOperationV2)):
                 clip = _find_clip(candidate, operation.clip_id)
                 if clip is None:
                     raise ValidationError("Clip does not exist")
                 if clip.timeline_start_frame == operation.timeline_start_frame:
-                    raise ValidationError("Move produced no changes")
-                candidate = move_clip(candidate, operation.clip_id, operation.timeline_start_frame)
+                    if isinstance(operation, ResolvedMoveOperationV2):
+                        current_track_id = next(
+                            track.id
+                            for track in candidate.timeline.tracks
+                            if any(item.id == operation.clip_id for item in track.clips)
+                        )
+                        effective_target_track_id = operation.target_track_id or current_track_id
+                        if effective_target_track_id == current_track_id:
+                            raise ValidationError("Move produced no changes")
+                    elif isinstance(operation, ResolvedMoveOperation):
+                        raise ValidationError("Move produced no changes")
+                candidate = move_clip(candidate, operation.clip_id, operation.timeline_start_frame,
+                                      getattr(operation, "target_track_id", None))
                 result = OperationResult(operation_index=index, op=operation.op, affected_ids=[operation.clip_id])
             elif isinstance(operation, ResolvedTrimOperation):
                 clip = _find_clip(candidate, operation.clip_id)
@@ -255,6 +332,21 @@ def _execute(project: "Project", operations: list[PreparedOperation]) -> tuple["
             elif isinstance(operation, ResolvedDeleteClipOperation):
                 candidate = delete_clip(candidate, operation.clip_id)
                 result = OperationResult(operation_index=index, op=operation.op, affected_ids=[operation.clip_id])
+            elif isinstance(operation, ResolvedAddTrackOperation):
+                refs = [ExternalReference(item.system, item.id, item.kind) for item in operation.external_refs]
+                candidate = add_track_domain(candidate, operation.name, operation.position, refs, operation.track_id)
+                result = OperationResult(operation_index=index, op=operation.op, affected_ids=[operation.track_id],
+                                         created_ids=[operation.track_id], result_ref=operation.result_ref)
+            elif isinstance(operation, ResolvedUpdateTrackOperation):
+                refs = None if operation.external_refs is None else [ExternalReference(item.system, item.id, item.kind) for item in operation.external_refs]
+                candidate = update_track_domain(candidate, operation.track_id, operation.name, refs)
+                result = OperationResult(operation_index=index, op=operation.op, affected_ids=[operation.track_id])
+            elif isinstance(operation, ResolvedDeleteTrackOperation):
+                candidate = delete_track_domain(candidate, operation.track_id)
+                result = OperationResult(operation_index=index, op=operation.op, affected_ids=[operation.track_id])
+            elif isinstance(operation, ResolvedReorderTrackOperation):
+                candidate = reorder_track_domain(candidate, operation.track_id, operation.position)
+                result = OperationResult(operation_index=index, op=operation.op, affected_ids=[operation.track_id])
             elif isinstance(operation, ResolvedAddMarkerOperation):
                 marker = Marker(operation.marker_id, operation.start_frame, operation.end_frame, operation.name,
                                 operation.description, operation.type, _marker_production(operation.production))
@@ -306,9 +398,14 @@ class TransactionService:
         except ValidationError as exc:
             raise TransactionError("INTEGRITY_ERROR", "Project integrity validation failed") from exc
 
-    def _parse_prepare(self, value: PrepareTransactionRequest | dict[str, Any]) -> PrepareTransactionRequest:
+    def _parse_prepare(self, value: PrepareTransactionRequest | PrepareTransactionRequestV2 | dict[str, Any]):
         try:
-            request = value if isinstance(value, PrepareTransactionRequest) else PrepareTransactionRequest.model_validate(value)
+            if isinstance(value, (PrepareTransactionRequest, PrepareTransactionRequestV2)):
+                request = value
+            elif isinstance(value, dict) and value.get("contract_version") == 2:
+                request = PrepareTransactionRequestV2.model_validate(value)
+            else:
+                request = PrepareTransactionRequest.model_validate(value)
             _request_size(request)
             return request
         except TransactionError:
@@ -316,9 +413,14 @@ class TransactionService:
         except PydanticValidationError as exc:
             raise TransactionError("INVALID_TRANSACTION", "Transaction request is invalid", cause_code="INVALID_REQUEST") from exc
 
-    def _parse_commit(self, value: CommitTransactionRequest | dict[str, Any]) -> CommitTransactionRequest:
+    def _parse_commit(self, value: CommitTransactionRequest | CommitTransactionRequestV2 | dict[str, Any]):
         try:
-            request = value if isinstance(value, CommitTransactionRequest) else CommitTransactionRequest.model_validate(value)
+            if isinstance(value, (CommitTransactionRequest, CommitTransactionRequestV2)):
+                request = value
+            elif isinstance(value, dict) and isinstance(value.get("prepared_transaction"), dict) and value["prepared_transaction"].get("contract_version") == 2:
+                request = CommitTransactionRequestV2.model_validate(value)
+            else:
+                request = CommitTransactionRequest.model_validate(value)
             _request_size(request)
             if len(_canonical(request.prepared_transaction.model_dump(mode="json"))) > MAX_TRANSACTION_BYTES:
                 raise TransactionError("INVALID_TRANSACTION", "Prepared transaction exceeds the size limit", cause_code="REQUEST_TOO_LARGE")
@@ -328,25 +430,31 @@ class TransactionService:
         except PydanticValidationError as exc:
             raise TransactionError("INVALID_TRANSACTION", "Prepared transaction is invalid", cause_code="INVALID_REQUEST") from exc
 
-    def prepare(self, project_id: str, value: PrepareTransactionRequest | dict[str, Any]) -> PrepareTransactionOutput:
+    def prepare(self, project_id: str, value: PrepareTransactionRequest | PrepareTransactionRequestV2 | dict[str, Any]):
         request = self._parse_prepare(value)
         with self.projects._project_lock(project_id):
             loaded = self._load(project_id)
             base = loaded.project
             if base.revision != request.expected_revision:
                 raise TransactionRevisionConflict(base.revision, base.revision_id)
-            resolved = _resolve_operations(base, request.operations)
+            is_v2 = isinstance(request, PrepareTransactionRequestV2)
+            resolved = _resolve_operations_v2(base, request.operations) if is_v2 else _resolve_operations(base, request.operations)
             candidate, results = _execute(deepcopy(base), resolved)
             if project_to_dict(candidate) == project_to_dict(base):
                 raise TransactionError("NO_CHANGES", "The transaction would not change the project", cause_code="NO_CHANGES")
+            if is_v2:
+                prepared = PreparedTransactionV2(contract_version=2, project_id=project_id,
+                                                 base_revision=base.revision, base_revision_id=base.revision_id,
+                                                 operations=resolved)
+                return PrepareTransactionOutputV2(status="prepared", transaction_hash=transaction_hash(prepared),
+                                                  prepared_transaction=prepared, operation_results=results, diff=_diff(base, candidate))
             prepared = PreparedTransaction(contract_version=1, project_id=project_id,
                                            base_revision=base.revision, base_revision_id=base.revision_id,
                                            operations=resolved)
             return PrepareTransactionOutput(status="prepared", transaction_hash=transaction_hash(prepared),
-                                            prepared_transaction=prepared, operation_results=results,
-                                            diff=_diff(base, candidate))
+                                            prepared_transaction=prepared, operation_results=results, diff=_diff(base, candidate))
 
-    def commit(self, project_id: str, value: CommitTransactionRequest | dict[str, Any], *, origin: str, actor: dict[str, str]) -> CommitTransactionOutput:
+    def commit(self, project_id: str, value: CommitTransactionRequest | CommitTransactionRequestV2 | dict[str, Any], *, origin: str, actor: dict[str, str]):
         request = self._parse_commit(value)
         prepared = request.prepared_transaction
         if prepared.project_id != project_id:
@@ -363,7 +471,10 @@ class TransactionService:
                 raise TransactionError("NO_CHANGES", "The transaction would not change the project", cause_code="NO_CHANGES")
             diff = _diff(base, candidate)
             try:
-                self.projects.guards.authorize(project_id, base, candidate, request.guard_tokens)
+                structural = any(operation.op in {"add_track", "update_track", "delete_track", "reorder_track"}
+                                 for operation in prepared.operations)
+                self.projects.guards.authorize(project_id, base, candidate, request.guard_tokens,
+                                               footprint=__import__("app.guard_models", fromlist=["MutationFootprint"]).MutationFootprint(project_wide=True) if structural else None)
             except Exception as exc:
                 if hasattr(exc, "code"):
                     raise TransactionError(exc.code, exc.message, conflicts=getattr(exc, "conflicts", [])) from exc
@@ -380,7 +491,8 @@ class TransactionService:
                 raise
             except Exception as exc:
                 raise TransactionError("PERSISTENCE_ERROR", "Transaction could not be persisted") from exc
-            return CommitTransactionOutput(
+            output_type = CommitTransactionOutputV2 if prepared.contract_version == 2 else CommitTransactionOutput
+            return output_type(
                 status="committed", project_id=committed.id, revision=committed.revision,
                 revision_id=committed.revision_id, parent_revision_id=base.revision_id,
                 transaction_hash=request.transaction_hash, operation_results=results, diff=diff,

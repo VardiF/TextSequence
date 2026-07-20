@@ -35,12 +35,14 @@ def _error(exc: Exception) -> dict[str, Any]:
     elif isinstance(exc, SilenceAnalysisError): code = exc.code
     elif isinstance(exc, ValidationError) and "Clip does not exist" in str(exc): code = "CLIP_NOT_FOUND"
     elif isinstance(exc, ValidationError) and "Marker does not exist" in str(exc): code = "MARKER_NOT_FOUND"
+    elif isinstance(exc, ValidationError) and "Track does not exist" in str(exc): code = "TRACK_NOT_FOUND"
     elif isinstance(exc, ValidationError) and "no changes" in str(exc).lower(): code = "NO_CHANGES"
     else: code = "INVALID_ARGUMENT"
     messages = {
         "PROJECT_NOT_FOUND": "Project does not exist",
         "CLIP_NOT_FOUND": "Clip does not exist",
         "MARKER_NOT_FOUND": "Marker does not exist",
+        "TRACK_NOT_FOUND": "Track does not exist",
         "STALE_REVISION": "Project revision is stale",
         "TIMELINE_CONFLICT": "Timeline operation conflicts with an existing clip",
         "NO_CHANGES": "The requested operation would not change the project",
@@ -138,8 +140,9 @@ def delete_clip(project_id: str, clip_id: str, expected_revision: int, guard_tok
 def move_clip(project_id: str, clip_id: str, expected_revision: int, destination: dict[str, Any], guard_tokens: list[str] | None = None) -> McpResult:
     try:
         kind = destination.get("kind")
-        if kind == "timeline_frame": result = application.projects.move(project_id, clip_id, int(destination["timeline_start_frame"]), expected_revision, origin="mcp", actor={"type": "agent"}, guard_tokens=guard_tokens)
-        elif kind == "gap" and destination.get("alignment") == "start": result = application.projects.move_to_gap(project_id, clip_id, int(destination["gap_ordinal"]), expected_revision, origin="mcp", actor={"type": "agent"}, guard_tokens=guard_tokens)
+        target_track_id = destination.get("target_track_id")
+        if kind == "timeline_frame": result = application.projects.move(project_id, clip_id, int(destination["timeline_start_frame"]), expected_revision, target_track_id, origin="mcp", actor={"type": "agent"}, guard_tokens=guard_tokens)
+        elif kind == "gap" and destination.get("alignment") == "start": result = application.projects.move_to_gap(project_id, clip_id, int(destination["gap_ordinal"]), expected_revision, target_track_id, origin="mcp", actor={"type": "agent"}, guard_tokens=guard_tokens)
         else: raise ValidationError("destination must be a timeline_frame or start-aligned gap")
         return {"ok": True, "project_id": result.id, "revision": result.revision, "revision_id": result.revision_id,
                 "timeline_id": result.timeline.id, "timeline": application.projects.timeline(result.id)}
@@ -192,6 +195,41 @@ def delete_marker(project_id: str, marker_id: str, expected_revision: int, guard
         return response
     except Exception as exc:
         return _error(exc)
+
+
+@mcp.tool(structured_output=True)
+def add_track(project_id: str, name: str, expected_revision: int, position: int | None = None,
+              external_refs: list[dict[str, Any]] | None = None, guard_tokens: list[str] | None = None) -> McpResult:
+    try:
+        before = application.projects.get(project_id)
+        result = application.projects.add_track(project_id, expected_revision, name, position, external_refs or [],
+                                                 origin="mcp", actor={"type": "agent"}, guard_tokens=guard_tokens)
+        created = next(track for track in result.timeline.tracks if track.id not in {item.id for item in before.timeline.tracks})
+        response = _mutation(lambda: result)
+        response["track_id"] = created.id
+        return response
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(structured_output=True)
+def update_track(project_id: str, track_id: str, expected_revision: int, name: str | None = None,
+                 external_refs: list[dict[str, Any]] | None = None, guard_tokens: list[str] | None = None) -> McpResult:
+    return _mutation(lambda: application.projects.update_track(project_id, track_id, expected_revision, name, external_refs,
+                                                                 origin="mcp", actor={"type": "agent"}, guard_tokens=guard_tokens))
+
+
+@mcp.tool(structured_output=True)
+def delete_track(project_id: str, track_id: str, expected_revision: int, guard_tokens: list[str] | None = None) -> McpResult:
+    return _mutation(lambda: application.projects.delete_track(project_id, track_id, expected_revision,
+                                                                 origin="mcp", actor={"type": "agent"}, guard_tokens=guard_tokens))
+
+
+@mcp.tool(structured_output=True)
+def reorder_track(project_id: str, track_id: str, position: int, expected_revision: int,
+                  guard_tokens: list[str] | None = None) -> McpResult:
+    return _mutation(lambda: application.projects.reorder_track(project_id, track_id, expected_revision, position,
+                                                                  origin="mcp", actor={"type": "agent"}, guard_tokens=guard_tokens))
 
 
 def _render(fn, project_id: str, expected_revision: int) -> dict[str, Any]:

@@ -38,6 +38,11 @@ class RevisionMetadata:
     restored_from_revision_id: Optional[str] = None
 
     def validate(self, project: Project) -> None:
+        self.validate_identity(project)
+        if self.snapshot_sha256 != revision_hash(self, project):
+            raise ValidationError("Revision integrity digest does not match revision metadata and project")
+
+    def validate_identity(self, project: Project) -> None:
         if self.project_id != project.id:
             raise ValidationError("Revision metadata project ID does not match snapshot")
         if self.revision_id != project.revision_id:
@@ -52,8 +57,19 @@ class RevisionMetadata:
             raise ValidationError("Invalid revision audit metadata")
         if self.restored_from_revision_id is not None:
             validate_revision_id(self.restored_from_revision_id)
-        if self.snapshot_sha256 != revision_hash(self, project):
-            raise ValidationError("Revision integrity digest does not match revision metadata and project")
+
+    def validate_raw(self, snapshot: dict[str, Any]) -> None:
+        """Authenticate the exact stored snapshot before schema migration."""
+        if not isinstance(snapshot, dict):
+            raise ValidationError("Revision snapshot must be an object")
+        if snapshot.get("id") != self.project_id:
+            raise ValidationError("Revision metadata project ID does not match raw snapshot")
+        if snapshot.get("revision_id") != self.revision_id:
+            raise ValidationError("Revision metadata revision ID does not match raw snapshot")
+        if snapshot.get("revision") != self.revision_number:
+            raise ValidationError("Revision metadata revision number does not match raw snapshot")
+        if self.snapshot_sha256 != revision_hash(self, snapshot):
+            raise ValidationError("Revision integrity digest does not match raw snapshot")
 
 
 def revision_digest_payload(metadata: RevisionMetadata, project: Project | dict[str, Any]) -> dict[str, Any]:
@@ -95,9 +111,10 @@ class RevisionRecord:
         if set(data) != {"metadata", "snapshot"} or not isinstance(data["metadata"], dict) or not isinstance(data["snapshot"], dict):
             raise ValidationError("Invalid revision record shape")
         metadata = RevisionMetadata(**data["metadata"])
+        metadata.validate_raw(data["snapshot"])
         from app.domain.models import project_from_dict
         project = project_from_dict(data["snapshot"])
-        metadata.validate(project)
+        metadata.validate_identity(project)
         return cls(metadata, data["snapshot"])
 
 
@@ -109,10 +126,19 @@ class HeadPointer:
     snapshot_sha256: str
 
     def validate(self, project: Project) -> None:
-        if (self.project_id, self.revision, self.revision_id) != (project.id, project.revision, project.revision_id):
-            raise ValidationError("HEAD does not identify the loaded project")
+        self.validate_identity(project)
         if self.snapshot_sha256 != snapshot_hash(project):
             raise ValidationError("HEAD snapshot hash does not match project")
+
+    def validate_identity(self, project: Project) -> None:
+        if (self.project_id, self.revision, self.revision_id) != (project.id, project.revision, project.revision_id):
+            raise ValidationError("HEAD does not identify the loaded project")
+
+    def validate_raw(self, snapshot: dict[str, Any]) -> None:
+        if (self.project_id, self.revision, self.revision_id) != (snapshot.get("id"), snapshot.get("revision"), snapshot.get("revision_id")):
+            raise ValidationError("HEAD does not identify the raw snapshot")
+        if self.snapshot_sha256 != snapshot_hash(snapshot):
+            raise ValidationError("HEAD snapshot hash does not match raw snapshot")
 
 
 def new_revision_id() -> str:

@@ -71,14 +71,16 @@ def _rewrite_head_revision(directory, mutate, resign=False):
     path.write_text(json.dumps(record))
 
 
-def test_v1_fixture_migrates_to_canonical_v2_without_top_level_tracks():
+def test_v1_fixture_migrates_to_canonical_v3_without_top_level_tracks():
     source = read_fixture("imported.json")
     migrated = project_from_dict(source)
     document = project_to_dict(migrated)
-    assert document["schema_version"] == 2
+    assert document["schema_version"] == 3
     assert set(document) == {"schema_version", "id", "name", "fps", "revision", "revision_id", "external_refs", "assets", "timeline"}
     assert document["revision"] == 4
     assert document["timeline"]["id"].startswith("timeline_")
+    assert document["timeline"]["video_canvas"] == {"width": 320, "height": 180}
+    assert document["assets"][0]["kind"] == "video"
     assert document["timeline"]["tracks"][0]["clips"][0]["source_out_frame"] == 48
     assert source["tracks"]
     repeated = project_to_dict(project_from_dict(source))

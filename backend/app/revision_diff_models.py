@@ -33,6 +33,7 @@ class SafeAssetProduction(SafeProduction):
 
 class SafeAsset(_StrictModel):
     id: str
+    kind: str
     name: str
     codec: str
     width: int
@@ -47,10 +48,12 @@ class SafeTrack(_StrictModel):
     name: str
     kind: str
     position: int
+    external_refs: list[SafeExternalReference]
 
 
 class SafeClip(_StrictModel):
     id: str
+    kind: str
     track_id: str
     asset_id: str
     source_in_frame: int

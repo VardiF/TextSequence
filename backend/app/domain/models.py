@@ -26,6 +26,8 @@ class FrameRate:
     denominator: int
 
     def __post_init__(self) -> None:
+        if any(isinstance(value, bool) or not isinstance(value, int) for value in (self.numerator, self.denominator)):
+            raise ValidationError("Frame rate values must be integers")
         if self.numerator <= 0 or self.denominator <= 0:
             raise ValidationError("Frame rate must be positive")
 
@@ -89,6 +91,15 @@ class Asset:
     fps: FrameRate
     duration_frames: int
     production: AssetProductionMetadata = field(default_factory=empty_asset_production)
+    kind: str = "video"
+
+    def __post_init__(self) -> None:
+        if self.kind != "video":
+            raise ValidationError("Asset kind must be video")
+        if any(isinstance(value, bool) or not isinstance(value, int) for value in (self.width, self.height, self.duration_frames)):
+            raise ValidationError("Asset dimensions and duration must be integers")
+        if self.width <= 0 or self.height <= 0 or self.duration_frames <= 0:
+            raise ValidationError("Asset dimensions and duration must be positive")
 
 
 @dataclass
@@ -99,8 +110,13 @@ class Clip:
     source_out_frame: int
     timeline_start_frame: int
     production: ClipProductionMetadata = field(default_factory=empty_clip_production)
+    kind: str = "video"
 
     def __post_init__(self) -> None:
+        if self.kind != "video":
+            raise ValidationError("Clip kind must be video")
+        if any(isinstance(value, bool) or not isinstance(value, int) for value in (self.source_in_frame, self.source_out_frame, self.timeline_start_frame)):
+            raise ValidationError("Clip frame positions must be integers")
         if self.source_in_frame < 0 or self.source_out_frame <= self.source_in_frame:
             raise ValidationError("Clip source range must be non-empty and non-negative")
         if self.timeline_start_frame < 0:
@@ -116,7 +132,24 @@ class Track:
     id: str
     name: str
     kind: str = "video"
+    external_refs: list[ExternalReference] = field(default_factory=list)
     clips: list[Clip] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self.kind != "video":
+            raise ValidationError("Track kind must be video")
+
+
+@dataclass
+class VideoCanvas:
+    width: int
+    height: int
+
+    def __post_init__(self) -> None:
+        if any(isinstance(value, bool) or not isinstance(value, int) for value in (self.width, self.height)):
+            raise ValidationError("Video canvas dimensions must be integers")
+        if self.width <= 0 or self.height <= 0:
+            raise ValidationError("Video canvas dimensions must be positive")
 
 
 @dataclass
@@ -165,6 +198,7 @@ class Timeline:
     id: str
     name: str = "Main timeline"
     external_refs: list[ExternalReference] = field(default_factory=list)
+    video_canvas: Optional[VideoCanvas] = None
     tracks: list[Track] = field(default_factory=list)
     markers: list[Marker] = field(default_factory=list)
 
@@ -179,7 +213,7 @@ class Project:
     external_refs: list[ExternalReference] = field(default_factory=list)
     assets: list[Asset] = field(default_factory=list)
     timeline: Optional[Timeline] = None
-    schema_version: int = 2
+    schema_version: int = 3
 
     def __post_init__(self) -> None:
         if self.timeline is None:
@@ -199,16 +233,22 @@ class Project:
         self.timeline.tracks = value
 
     def validate(self) -> None:
-        if self.schema_version != 2:
+        if self.schema_version != 3:
             raise ValidationError("Unsupported project schema version")
         if not self.id or not self.revision_id or self.timeline is None or not self.timeline.id:
             raise ValidationError("Project identity is incomplete")
         validate_revision_id(self.revision_id)
-        if self.revision < 0:
+        if isinstance(self.revision, bool) or not isinstance(self.revision, int) or self.revision < 0:
             raise ValidationError("Revision cannot be negative")
+        if not 1 <= len(self.tracks) <= 64:
+            raise ValidationError("A project must contain 1-64 video tracks")
+        if self.timeline.video_canvas is not None and not isinstance(self.timeline.video_canvas, VideoCanvas):
+            raise ValidationError("Invalid video canvas")
         ids: list[str] = [self.id, self.timeline.id]
         ids.extend(a.id for a in self.assets)
         ids.extend(t.id for t in self.tracks)
+        if len({track.id for track in self.tracks}) != len(self.tracks):
+            raise ValidationError("Track IDs must be unique")
         ids.extend(c.id for t in self.tracks for c in t.clips)
         for marker in self.timeline.markers:
             if not isinstance(marker, Marker):
@@ -224,15 +264,47 @@ class Project:
             for asset in self.assets:
                 if asset.fps.as_tuple() != self.fps.as_tuple():
                     raise ValidationError("Asset FPS must match project FPS")
+        for refs, label in ((self.external_refs, "project"), (self.timeline.external_refs, "timeline")):
+            if any(not isinstance(ref, ExternalReference) or not ref.system or not ref.id for ref in refs):
+                raise ValidationError(f"{label} external_refs are invalid")
+            keys = [(ref.system, ref.id, ref.kind) for ref in refs]
+            if len(keys) != len(set(keys)):
+                raise ValidationError(f"{label} external_refs must be unique")
+        has_video = bool(self.assets or any(track.clips for track in self.tracks))
+        # Domain constructors used by older callers may append an asset before
+        # validation. Establish the canonical canvas deterministically in that
+        # in-memory case; persisted v3 parsing rejects a missing canvas before
+        # reaching this compatibility convenience.
+        if has_video and self.timeline.video_canvas is None and self.assets:
+            first_asset = self.assets[0]
+            self.timeline.video_canvas = VideoCanvas(first_asset.width, first_asset.height)
+        if has_video and self.timeline.video_canvas is None:
+            raise ValidationError("Video canvas is required when video exists")
+        if not has_video and self.timeline.video_canvas is not None:
+            # Older in-memory mutation helpers may remove the last asset while
+            # retaining the derived canvas. Canonical serialization normalizes
+            # that transient state to the required null value.
+            self.timeline.video_canvas = None
         asset_ids = {a.id for a in self.assets}
         asset_by_id = {a.id: a for a in self.assets}
         for track in self.tracks:
+            if track.kind != "video":
+                raise ValidationError("Track kind must be video")
+            if any(not isinstance(ref, ExternalReference) or not ref.system or not ref.id for ref in track.external_refs):
+                raise ValidationError("Track external_refs are invalid")
+            track_keys = [(ref.system, ref.id, ref.kind) for ref in track.external_refs]
+            if len(track_keys) != len(set(track_keys)):
+                raise ValidationError("Track external_refs must be unique")
             ordered_clips = sorted(track.clips, key=lambda clip: (clip.timeline_start_frame, clip.id))
+            if track.clips != ordered_clips:
+                raise ValidationError("Clips must be sorted by timeline position and ID")
             for previous, current in zip(ordered_clips, ordered_clips[1:]):
                 previous_end = previous.timeline_start_frame + previous.duration_frames
                 if current.timeline_start_frame < previous_end:
                     raise TimelineConflictError(f"Clips {previous.id} and {current.id} overlap on {track.name}")
             for clip in track.clips:
+                if clip.kind != "video":
+                    raise ValidationError("Clip kind must be video")
                 if clip.asset_id not in asset_ids:
                     raise ValidationError("Clip references an unknown asset")
                 if clip.source_in_frame < 0 or clip.source_out_frame <= clip.source_in_frame:
@@ -318,6 +390,20 @@ def _reject_unknown(data: dict[str, Any], allowed: set[str], path: str) -> None:
         raise ValidationError(f"Unknown field at {path}.{unknown[0]}")
 
 
+def _canvas_for_assets(assets: list[dict[str, Any]], tracks: list[dict[str, Any]]) -> dict[str, int] | None:
+    if not assets and not any(track.get("clips") for track in tracks):
+        return None
+    if not assets:
+        raise ValidationError("Video canvas cannot be derived without assets")
+    first = assets[0]
+    return {"width": first["width"], "height": first["height"]}
+
+
+def _deterministic_v1_track_id(project_id: str) -> str:
+    import hashlib
+    return f"track_{hashlib.sha256(f'textsequence:v3:track:{project_id}:V1'.encode()).hexdigest()[:32]}"
+
+
 def _project_from_v2(data: dict[str, Any]) -> Project:
     _reject_unknown(data, {"schema_version", "id", "name", "fps", "revision", "revision_id", "external_refs", "assets", "timeline", "tracks", "timeline_id"}, "project")
     if data.get("schema_version") != 2:
@@ -327,19 +413,24 @@ def _project_from_v2(data: dict[str, Any]) -> Project:
     assets = []
     for index, item in enumerate(data.get("assets", [])):
         _reject_unknown(item, {"id", "path", "name", "codec", "width", "height", "fps", "duration_frames", "production"}, f"project.assets[{index}]")
-        assets.append(Asset(**{**item, "fps": FrameRate(**item["fps"]), "production": _asset_production(item.get("production"))}))
+        assets.append(Asset(**{**item, "fps": FrameRate(**item["fps"]), "production": _asset_production(item.get("production")), "kind": "video"}))
     timeline_data = data.get("timeline")
     if not isinstance(timeline_data, dict):
         raise ValidationError("Invalid field at project.timeline")
     _reject_unknown(timeline_data, {"id", "name", "external_refs", "tracks", "markers"}, "project.timeline")
     tracks = []
     for track_index, item in enumerate(timeline_data.get("tracks", [])):
-        _reject_unknown(item, {"id", "name", "kind", "clips"}, f"project.timeline.tracks[{track_index}]")
+        _reject_unknown(item, {"id", "name", "kind", "external_refs", "clips"}, f"project.timeline.tracks[{track_index}]")
+        if item.get("kind", "video") != "video":
+            raise ValidationError("Unsupported track kind")
         clips = []
         for clip_index, clip_data in enumerate(item.get("clips", [])):
             _reject_unknown(clip_data, {"id", "asset_id", "source_in_frame", "source_out_frame", "timeline_start_frame", "production"}, f"project.timeline.tracks[{track_index}].clips[{clip_index}]")
-            clips.append(Clip(**{**clip_data, "production": _clip_production(clip_data.get("production"))}))
-        tracks.append(Track(id=item["id"], name=item["name"], kind=item.get("kind", "video"), clips=clips))
+            clips.append(Clip(**{**clip_data, "production": _clip_production(clip_data.get("production")), "kind": "video"}))
+        clips.sort(key=lambda clip: (clip.timeline_start_frame, clip.id))
+        tracks.append(Track(id=item["id"], name=item["name"], kind="video", external_refs=_external_refs(item.get("external_refs")), clips=clips))
+    if not tracks:
+        tracks.append(Track(id=_deterministic_v1_track_id(data["id"]), name="V1"))
     markers = []
     for marker_index, marker_data in enumerate(timeline_data.get("markers", [])):
         if not isinstance(marker_data, dict):
@@ -351,12 +442,81 @@ def _project_from_v2(data: dict[str, Any]) -> Project:
         production = _marker_production(marker_data.get("production"))
         _validate_marker_production(production)
         markers.append(Marker(**{**marker_data, "production": production}))
-    timeline = Timeline(id=timeline_data["id"], name=timeline_data.get("name", "Main timeline"), external_refs=_external_refs(timeline_data.get("external_refs")), tracks=tracks, markers=sorted(markers, key=marker_sort_key))
+    timeline = Timeline(id=timeline_data["id"], name=timeline_data.get("name", "Main timeline"), external_refs=_external_refs(timeline_data.get("external_refs")), video_canvas=None, tracks=tracks, markers=sorted(markers, key=marker_sort_key))
     if "timeline_id" in data and data["timeline_id"] != timeline.id:
         raise ValidationError("Project timeline_id does not match timeline.id")
     if "tracks" in data and data["tracks"] != timeline_data.get("tracks"):
         raise ValidationError("Project tracks alias does not match timeline.tracks")
-    project = Project(id=data["id"], name=data["name"], fps=fps, revision=data.get("revision", 0), revision_id=data["revision_id"], external_refs=_external_refs(data.get("external_refs")), assets=assets, timeline=timeline, schema_version=2)
+    canvas = _canvas_for_assets(data.get("assets", []), data.get("timeline", {}).get("tracks", []))
+    timeline.video_canvas = VideoCanvas(**canvas) if canvas else None
+    project = Project(id=data["id"], name=data["name"], fps=fps, revision=data.get("revision", 0), revision_id=data["revision_id"], external_refs=_external_refs(data.get("external_refs")), assets=assets, timeline=timeline, schema_version=3)
+    project.validate()
+    return project
+
+
+def _project_from_v3(data: dict[str, Any]) -> Project:
+    _reject_unknown(data, {"schema_version", "id", "name", "fps", "revision", "revision_id", "external_refs", "assets", "timeline", "tracks", "timeline_id"}, "project")
+    if data.get("schema_version") != 3:
+        raise ValidationError("Invalid schema_version")
+    required = {"schema_version", "id", "name", "fps", "revision", "revision_id", "external_refs", "assets", "timeline"} - set(data)
+    if required:
+        raise ValidationError(f"Missing project field: {sorted(required)[0]}")
+    fps_data = data.get("fps")
+    fps = FrameRate(**fps_data) if fps_data else None
+    assets = []
+    for index, item in enumerate(data.get("assets", [])):
+        _reject_unknown(item, {"id", "kind", "path", "name", "codec", "width", "height", "fps", "duration_frames", "production"}, f"project.assets[{index}]")
+        if item.get("kind") != "video":
+            raise ValidationError("Asset kind must be video")
+        assets.append(Asset(**{**item, "fps": FrameRate(**item["fps"]), "production": _asset_production(item.get("production"))}))
+    timeline_data = data.get("timeline")
+    if not isinstance(timeline_data, dict):
+        raise ValidationError("Invalid field at project.timeline")
+    _reject_unknown(timeline_data, {"id", "name", "external_refs", "video_canvas", "tracks", "markers"}, "project.timeline")
+    required_timeline = {"id", "name", "external_refs", "video_canvas", "tracks", "markers"} - set(timeline_data)
+    if required_timeline:
+        raise ValidationError(f"Missing timeline field: {sorted(required_timeline)[0]}")
+    canvas_data = timeline_data.get("video_canvas")
+    canvas = VideoCanvas(**canvas_data) if canvas_data is not None else None
+    if (assets or any(item.get("clips") for item in timeline_data.get("tracks", []))) and canvas is None:
+        raise ValidationError("Video canvas is required when video exists")
+    if not assets and not any(item.get("clips") for item in timeline_data.get("tracks", [])) and canvas is not None:
+        raise ValidationError("Video canvas requires video content")
+    tracks = []
+    for track_index, item in enumerate(timeline_data.get("tracks", [])):
+        _reject_unknown(item, {"id", "name", "kind", "external_refs", "clips"}, f"project.timeline.tracks[{track_index}]")
+        required_track = {"id", "name", "kind", "external_refs", "clips"} - set(item)
+        if required_track:
+            raise ValidationError(f"Missing track field: {sorted(required_track)[0]}")
+        if item.get("kind") != "video":
+            raise ValidationError("Track kind must be video")
+        clips = []
+        for clip_index, clip_data in enumerate(item.get("clips", [])):
+            _reject_unknown(clip_data, {"id", "kind", "asset_id", "source_in_frame", "source_out_frame", "timeline_start_frame", "production"}, f"project.timeline.tracks[{track_index}].clips[{clip_index}]")
+            required_clip = {"id", "kind", "asset_id", "source_in_frame", "source_out_frame", "timeline_start_frame", "production"} - set(clip_data)
+            if required_clip:
+                raise ValidationError(f"Missing clip field: {sorted(required_clip)[0]}")
+            if clip_data.get("kind") != "video":
+                raise ValidationError("Clip kind must be video")
+            clips.append(Clip(**{**clip_data, "production": _clip_production(clip_data.get("production"))}))
+        tracks.append(Track(id=item["id"], name=item["name"], kind=item["kind"], external_refs=_external_refs(item.get("external_refs")), clips=clips))
+    markers = []
+    for marker_index, marker_data in enumerate(timeline_data.get("markers", [])):
+        if not isinstance(marker_data, dict):
+            raise ValidationError(f"Invalid marker at project.timeline.markers[{marker_index}]")
+        _reject_unknown(marker_data, {"id", "start_frame", "end_frame", "name", "description", "type", "production"}, f"project.timeline.markers[{marker_index}]")
+        required = {"id", "start_frame", "name"} - set(marker_data)
+        if required:
+            raise ValidationError(f"Missing marker field: {sorted(required)[0]}")
+        production = _marker_production(marker_data.get("production"))
+        _validate_marker_production(production)
+        markers.append(Marker(**{**marker_data, "production": production}))
+    timeline = Timeline(id=timeline_data["id"], name=timeline_data.get("name", "Main timeline"), external_refs=_external_refs(timeline_data.get("external_refs")), video_canvas=canvas, tracks=tracks, markers=sorted(markers, key=marker_sort_key))
+    project = Project(id=data["id"], name=data["name"], fps=fps, revision=data.get("revision", 0), revision_id=data["revision_id"], external_refs=_external_refs(data.get("external_refs")), assets=assets, timeline=timeline, schema_version=3)
+    if "timeline_id" in data and data["timeline_id"] != timeline.id:
+        raise ValidationError("Project timeline_id does not match timeline.id")
+    if "tracks" in data and data["tracks"] != timeline_data.get("tracks"):
+        raise ValidationError("Project tracks alias does not match timeline.tracks")
     project.validate()
     return project
 
@@ -365,7 +525,10 @@ def project_from_dict(data: dict[str, Any]) -> Project:
     if not isinstance(data, dict):
         raise ValidationError("Project document must be an object")
     schema_version = data.get("schema_version", 1)
-    if schema_version != 2:
-        from app.persistence.migrations import migrate_document
-        data = migrate_document(data)
-    return _project_from_v2(data)
+    if schema_version == 3:
+        return _project_from_v3(data)
+    if schema_version == 2:
+        from app.persistence.migrations import migrate_v2_to_v3
+        return _project_from_v3(migrate_v2_to_v3(data))
+    from app.persistence.migrations import migrate_document
+    return _project_from_v3(migrate_document(data))

@@ -52,6 +52,8 @@ class CreateProject(BaseModel):
 
 class ImportMedia(BaseModel):
     path: str
+    target_track_id: str | None = None
+    timeline_start_frame: int | None = None
     guard_tokens: list[StrictStr] = Field(default_factory=list)
 
 
@@ -67,6 +69,36 @@ class SplitMutation(ClipMutation):
 
 class MoveMutation(ClipMutation):
     timeline_start_frame: int
+    target_track_id: str | None = None
+
+
+class AddTrackMutation(BaseModel):
+    expected_revision: int
+    name: str
+    position: int | None = None
+    external_refs: list[dict] = Field(default_factory=list)
+    guard_tokens: list[StrictStr] = Field(default_factory=list)
+
+
+class UpdateTrackMutation(BaseModel):
+    track_id: str
+    expected_revision: int
+    name: str | None = None
+    external_refs: list[dict] | None = None
+    guard_tokens: list[StrictStr] = Field(default_factory=list)
+
+
+class DeleteTrackMutation(BaseModel):
+    track_id: str
+    expected_revision: int
+    guard_tokens: list[StrictStr] = Field(default_factory=list)
+
+
+class ReorderTrackMutation(BaseModel):
+    track_id: str
+    expected_revision: int
+    position: int
+    guard_tokens: list[StrictStr] = Field(default_factory=list)
 
 
 class TrimMutation(ClipMutation):
@@ -160,7 +192,7 @@ def health():
     return {
         "status": "ok",
         "ffprobe": {"available": bool(ffprobe), "path": ffprobe},
-        "mcp": {"status": "running", "endpoint": "http://127.0.0.1:8000/mcp", "transport": "Streamable HTTP", "tool_count": 23, "resource_count": 8},
+        "mcp": {"status": "running", "endpoint": "http://127.0.0.1:8000/mcp", "transport": "Streamable HTTP", "tool_count": 27, "resource_count": 8},
         "built_in_assistant": {"configured": agent_runtime.configured()},
     }
 
@@ -374,7 +406,7 @@ def media(project_id: str, asset_id: str):
 @router.post("/projects/{project_id}/assets")
 def import_media(project_id: str, request: ImportMedia):
     try:
-        return _rest_project(service.import_media(project_id, request.path, origin="rest", actor={"type": "human"}, guard_tokens=request.guard_tokens))
+        return _rest_project(service.import_media(project_id, request.path, request.target_track_id, request.timeline_start_frame, origin="rest", actor={"type": "human"}, guard_tokens=request.guard_tokens))
     except (FileNotFoundError, ProbeError, ValidationError) as exc:
         raise HTTPException(400, str(exc)) from exc
     except StaleRevisionError as exc:
@@ -384,9 +416,9 @@ def import_media(project_id: str, request: ImportMedia):
 
 
 @router.post("/projects/{project_id}/assets/upload")
-async def upload_media(project_id: str, file: UploadFile = File(...), expected_revision: int = Form(...), guard_tokens: list[str] = Form(default=[])):
+async def upload_media(project_id: str, file: UploadFile = File(...), expected_revision: int = Form(...), target_track_id: str | None = Form(default=None), timeline_start_frame: int | None = Form(default=None), guard_tokens: list[str] = Form(default=[])):
     try:
-        project = await service.import_uploaded_media(project_id, file, expected_revision,
+        project = await service.import_uploaded_media(project_id, file, expected_revision, target_track_id, timeline_start_frame,
                                                        origin="rest", actor={"type": "human"}, guard_tokens=guard_tokens)
         return _rest_project(project)
     except StaleRevisionError as exc:
@@ -477,7 +509,39 @@ def delete(project_id: str, request: ClipMutation):
 @router.post("/projects/{project_id}/clips/move")
 def move(project_id: str, request: MoveMutation):
     try:
-        return _rest_project(service.move(project_id, request.clip_id, request.timeline_start_frame, request.expected_revision, origin="rest", actor={"type": "human"}, guard_tokens=request.guard_tokens))
+        return _rest_project(service.move(project_id, request.clip_id, request.timeline_start_frame, request.expected_revision, request.target_track_id, origin="rest", actor={"type": "human"}, guard_tokens=request.guard_tokens))
+    except (StaleRevisionError, ValidationError, FileNotFoundError, GuardError) as exc:
+        raise _mutation_error(exc) from exc
+
+
+@router.post("/projects/{project_id}/tracks/add")
+def add_track(project_id: str, request: AddTrackMutation):
+    try:
+        return _rest_project(service.add_track(project_id, request.expected_revision, request.name, request.position, request.external_refs, origin="rest", actor={"type": "human"}, guard_tokens=request.guard_tokens))
+    except (StaleRevisionError, ValidationError, FileNotFoundError, GuardError) as exc:
+        raise _mutation_error(exc) from exc
+
+
+@router.post("/projects/{project_id}/tracks/update")
+def update_track(project_id: str, request: UpdateTrackMutation):
+    try:
+        return _rest_project(service.update_track(project_id, request.track_id, request.expected_revision, request.name, request.external_refs, origin="rest", actor={"type": "human"}, guard_tokens=request.guard_tokens))
+    except (StaleRevisionError, ValidationError, FileNotFoundError, GuardError) as exc:
+        raise _mutation_error(exc) from exc
+
+
+@router.post("/projects/{project_id}/tracks/delete")
+def delete_track(project_id: str, request: DeleteTrackMutation):
+    try:
+        return _rest_project(service.delete_track(project_id, request.track_id, request.expected_revision, origin="rest", actor={"type": "human"}, guard_tokens=request.guard_tokens))
+    except (StaleRevisionError, ValidationError, FileNotFoundError, GuardError) as exc:
+        raise _mutation_error(exc) from exc
+
+
+@router.post("/projects/{project_id}/tracks/reorder")
+def reorder_track(project_id: str, request: ReorderTrackMutation):
+    try:
+        return _rest_project(service.reorder_track(project_id, request.track_id, request.expected_revision, request.position, origin="rest", actor={"type": "human"}, guard_tokens=request.guard_tokens))
     except (StaleRevisionError, ValidationError, FileNotFoundError, GuardError) as exc:
         raise _mutation_error(exc) from exc
 

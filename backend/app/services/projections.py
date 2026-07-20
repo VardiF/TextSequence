@@ -19,7 +19,7 @@ def _production(value) -> dict:
 
 def asset_projection(asset: Asset) -> dict:
     return {
-        "id": asset.id, "name": asset.name,
+        "id": asset.id, "kind": asset.kind, "name": asset.name,
         "duration_frames": asset.duration_frames,
         "fps": {"numerator": asset.fps.numerator, "denominator": asset.fps.denominator} if asset.fps else None,
         "width": asset.width, "height": asset.height, "codec": asset.codec,
@@ -30,7 +30,7 @@ def asset_projection(asset: Asset) -> dict:
 def clip_projection(clip: Clip, track, assets: dict[str, Asset]) -> dict:
     asset = assets[clip.asset_id]
     return {
-        "id": clip.id, "track_id": track.id, "track_name": track.name, "track_kind": track.kind,
+        "id": clip.id, "kind": clip.kind, "track_id": track.id, "track_name": track.name, "track_kind": track.kind,
         "asset_id": clip.asset_id, "asset_name": asset.name,
         "source_in_frame": clip.source_in_frame, "source_out_frame": clip.source_out_frame,
         "duration_frames": clip.duration_frames, "timeline_start_frame": clip.timeline_start_frame,
@@ -51,6 +51,7 @@ def project_summary_projection(project: Project) -> dict:
     return {
         "project_id": project.id, "name": project.name, "revision": project.revision,
         "revision_id": project.revision_id, "timeline_id": project.timeline.id,
+        "schema_version": project.schema_version,
         "fps": {"numerator": project.fps.numerator, "denominator": project.fps.denominator} if project.fps else None,
         "clip_count": sum(len(track.clips) for track in project.timeline.tracks),
         "asset_count": len(project.assets), "marker_count": len(project.timeline.markers),
@@ -62,6 +63,10 @@ def project_projection(project: Project) -> dict:
         **project_summary_projection(project),
         "schema_version": project.schema_version,
         "assets": [asset_projection(asset) for asset in sorted(project.assets, key=lambda item: item.id)],
+        "video_canvas": None if project.timeline.video_canvas is None else {"width": project.timeline.video_canvas.width, "height": project.timeline.video_canvas.height},
+        "tracks": [{"id": track.id, "name": track.name, "kind": track.kind, "position": index,
+                    "external_refs": [_reference(ref) for ref in track.external_refs]}
+                   for index, track in enumerate(project.timeline.tracks)],
     }
 
 

@@ -52,41 +52,52 @@ def _build_command(plan: RenderPlan, output: Path, revision: int, render_type: s
     ffmpeg = find_ffmpeg()
     if not ffmpeg:
         raise RenderError("ffmpeg is required to render a timeline; install FFmpeg or configure FFMPEG_BIN")
-    if not plan.segments:
+    if not plan.layers or plan.duration_frames <= 0:
         raise RenderError("Render plan has no segments")
-    audio = _has_audio(next(segment.source_path for segment in plan.segments if isinstance(segment, ClipSegment)))
     args = [ffmpeg, "-y", "-v", "error"]
     filters: list[str] = []
-    concat_inputs: list[str] = []
-    input_index = 0
     fps_text = f"{plan.fps[0]}/{plan.fps[1]}"
-    for segment_index, segment in enumerate(plan.segments):
-        if isinstance(segment, ClipSegment):
+    duration = frames_to_ffmpeg_time(plan.duration_frames, plan.fps)
+    input_index = 0
+    video_inputs: list[tuple[int, ClipSegment]] = []
+    audio_inputs: list[tuple[int, ClipSegment]] = []
+    audio_capable: set[str] = set()
+    for source in sorted({segment.source_path for layer in plan.layers for segment in layer.segments}):
+        if _has_audio(source):
+            audio_capable.add(source)
+    for layer in plan.layers:
+        for segment in layer.segments:
             args += ["-i", segment.source_path]
-            video_index = input_index
+            video_inputs.append((input_index, segment))
+            if segment.source_path in audio_capable:
+                audio_inputs.append((input_index, segment))
             input_index += 1
-            filters.append(f"[{video_index}:v]trim=start_frame={segment.source_in_frame}:end_frame={segment.source_out_frame},setpts=PTS-STARTPTS,format=yuv420p[v{segment_index}]")
-            if audio:
-                start = frames_to_ffmpeg_time(segment.source_in_frame, plan.fps)
-                end = frames_to_ffmpeg_time(segment.source_out_frame, plan.fps)
-                filters.append(f"[{video_index}:a]atrim=start={start}:end={end},asetpts=PTS-STARTPTS,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a{segment_index}]")
-        else:
-            duration = frames_to_ffmpeg_time(segment.duration_frames, plan.fps)
-            args += ["-f", "lavfi", "-i", f"color=c=black:s={plan.width}x{plan.height}:r={fps_text}:d={duration}"]
-            filters.append(f"[{input_index}:v]setpts=PTS-STARTPTS,format=yuv420p[v{segment_index}]")
-            input_index += 1
-            if audio:
-                args += ["-f", "lavfi", "-i", f"anullsrc=channel_layout=stereo:sample_rate=48000:d={duration}"]
-                filters.append(f"[{input_index}:a]asetpts=PTS-STARTPTS[a{segment_index}]")
-                input_index += 1
-        concat_inputs.append(f"[v{segment_index}]" + (f"[a{segment_index}]" if audio else ""))
-    concat = "".join(concat_inputs)
-    if audio:
-        filters.append(f"{concat}concat=n={len(plan.segments)}:v=1:a=1[vout][aout]")
-    else:
-        filters.append(f"{concat}concat=n={len(plan.segments)}:v=1:a=0[vout]")
+
+    filters.append(f"color=c=black:s={plan.width}x{plan.height}:r={fps_text}:d={duration},format=rgba[canvas0]")
+    current = "canvas0"
+    for index, (source_index, segment) in enumerate(video_inputs):
+        offset = frames_to_ffmpeg_time(segment.timeline_start_frame, plan.fps)
+        filters.append(
+            f"[{source_index}:v]trim=start_frame={segment.source_in_frame}:end_frame={segment.source_out_frame},"
+            f"setpts=PTS-STARTPTS+{offset}/TB,scale={plan.width}:{plan.height}:force_original_aspect_ratio=decrease,"
+            f"pad={plan.width}:{plan.height}:(ow-iw)/2:(oh-ih)/2:color=black@0,format=rgba[vclip{index}]"
+        )
+        filters.append(f"[{current}][vclip{index}]overlay=eof_action=pass:format=auto[canvas{index + 1}]")
+        current = f"canvas{index + 1}"
+    filters.append(f"[{current}]format=yuv420p[vout]")
+    has_audio = bool(audio_inputs)
+    if has_audio:
+        audio_labels: list[str] = []
+        for index, (source_index, segment) in enumerate(audio_inputs):
+            start = frames_to_ffmpeg_time(segment.source_in_frame, plan.fps)
+            end = frames_to_ffmpeg_time(segment.source_out_frame, plan.fps)
+            delay = frames_to_ffmpeg_time(segment.timeline_start_frame, plan.fps)
+            delay_ms = round(segment.timeline_start_frame * plan.fps[1] * 1000 / plan.fps[0])
+            filters.append(f"[{source_index}:a]atrim=start={start}:end={end},asetpts=PTS-STARTPTS,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,adelay={delay_ms}:all=1,apad,atrim=duration={duration}[ain{index}]")
+            audio_labels.append(f"[ain{index}]")
+        filters.append("".join(audio_labels) + f"amix=inputs={len(audio_labels)}:normalize=0:duration=longest,alimiter=limit=1,aresample=48000,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,apad,atrim=duration={duration}[aout]")
     args += ["-filter_complex", ";".join(filters), "-map", "[vout]"]
-    if audio:
+    if has_audio:
         args += ["-map", "[aout]", "-c:a", "aac", "-b:a", "128k"]
     else:
         args += ["-an"]

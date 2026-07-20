@@ -27,6 +27,7 @@ class ProjectSummaryOutput(BaseModel):
     revision: int
     revision_id: str
     timeline_id: str
+    schema_version: int
     fps: dict[str, int] | None = None
     clip_count: int
     asset_count: int
@@ -38,6 +39,8 @@ class QueryOutput(BaseModel):
     project_id: str
     revision: int
     revision_id: str
+    schema_version: int
+    video_canvas: dict[str, int] | None = None
     query: dict[str, Any]
     clips: list[dict[str, Any]]
     markers: list[dict[str, Any]]

@@ -195,12 +195,146 @@ class CommitTransactionRequest(_StrictModel):
     guard_tokens: list[StrictStr] = Field(default_factory=list)
 
 
+# Contract v2 is intentionally additive.  The v1 models above are kept byte
+# and validation compatible; v2 gets its own move and track operation shapes.
+class MoveOperationV2(_StrictModel):
+    op: Literal["move_clip"]
+    clip: EntityReference
+    timeline_start_frame: StrictInt
+    target_track_id: EntityReference | None = None
+
+
+class AddTrackOperation(_StrictModel):
+    op: Literal["add_track"]
+    result_ref: Annotated[StrictStr, Field(pattern=r"[A-Za-z][A-Za-z0-9_-]{0,63}")]
+    name: StrictStr
+    position: StrictInt | None = None
+    external_refs: list[MarkerExternalReference] = Field(default_factory=list)
+
+
+class UpdateTrackOperation(_StrictModel):
+    op: Literal["update_track"]
+    track: EntityReference
+    name: StrictStr | None = None
+    external_refs: list[MarkerExternalReference] | None = None
+
+    @model_validator(mode="after")
+    def has_change(self) -> "UpdateTrackOperation":
+        if self.name is None and self.external_refs is None:
+            raise ValueError("Track update requires name or external_refs")
+        return self
+
+
+class DeleteTrackOperation(_StrictModel):
+    op: Literal["delete_track"]
+    track: EntityReference
+
+
+class ReorderTrackOperation(_StrictModel):
+    op: Literal["reorder_track"]
+    track: EntityReference
+    position: StrictInt
+
+
+RawOperationV2 = Annotated[Union[
+    SplitOperation, MoveOperationV2, TrimOperation, DeleteClipOperation,
+    AddMarkerOperation, UpdateMarkerOperation, DeleteMarkerOperation,
+    AddTrackOperation, UpdateTrackOperation, DeleteTrackOperation, ReorderTrackOperation,
+], Field(discriminator="op")]
+
+
+class PrepareTransactionRequestV2(_StrictModel):
+    contract_version: Literal[2] = 2
+    expected_revision: Annotated[StrictInt, Field(ge=0)]
+    operations: Annotated[list[RawOperationV2], Field(min_length=1, max_length=100)]
+
+
+class ResolvedMoveOperationV2(_StrictModel):
+    op: Literal["move_clip"]
+    clip_id: StrictStr
+    timeline_start_frame: StrictInt
+    target_track_id: StrictStr | None = None
+
+
+class ResolvedAddTrackOperation(_StrictModel):
+    op: Literal["add_track"]
+    result_ref: StrictStr
+    track_id: StrictStr
+    name: StrictStr
+    position: StrictInt | None = None
+    external_refs: list[MarkerExternalReference] = Field(default_factory=list)
+
+
+class ResolvedUpdateTrackOperation(_StrictModel):
+    op: Literal["update_track"]
+    track_id: StrictStr
+    name: StrictStr | None = None
+    external_refs: list[MarkerExternalReference] | None = None
+
+
+class ResolvedDeleteTrackOperation(_StrictModel):
+    op: Literal["delete_track"]
+    track_id: StrictStr
+
+
+class ResolvedReorderTrackOperation(_StrictModel):
+    op: Literal["reorder_track"]
+    track_id: StrictStr
+    position: StrictInt
+
+
+PreparedOperationV2 = Annotated[Union[
+    ResolvedSplitOperation, ResolvedMoveOperationV2, ResolvedTrimOperation,
+    ResolvedDeleteClipOperation, ResolvedAddMarkerOperation,
+    ResolvedUpdateMarkerOperation, ResolvedDeleteMarkerOperation,
+    ResolvedAddTrackOperation, ResolvedUpdateTrackOperation,
+    ResolvedDeleteTrackOperation, ResolvedReorderTrackOperation,
+], Field(discriminator="op")]
+
+
+class PreparedTransactionV2(_StrictModel):
+    contract_version: Literal[2]
+    project_id: StrictStr
+    base_revision: Annotated[StrictInt, Field(ge=0)]
+    base_revision_id: StrictStr
+    operations: Annotated[list[PreparedOperationV2], Field(min_length=1, max_length=100)]
+
+
+class CommitTransactionRequestV2(_StrictModel):
+    transaction_hash: Annotated[StrictStr, Field(pattern=r"[0-9a-f]{64}")]
+    prepared_transaction: PreparedTransactionV2
+    guard_tokens: list[StrictStr] = Field(default_factory=list)
+
+
 class OperationResult(_StrictModel):
     operation_index: Annotated[StrictInt, Field(ge=0)]
     op: StrictStr
     affected_ids: list[StrictStr]
     created_ids: list[StrictStr] = Field(default_factory=list)
     result_ref: StrictStr | None = None
+
+
+class PrepareTransactionOutputV2(_StrictModel):
+    ok: Literal[True] = True
+    status: Literal["prepared"]
+    commit_requires_unchanged_base: Literal[True] = True
+    transaction_hash: StrictStr
+    prepared_transaction: PreparedTransactionV2
+    operation_results: list[OperationResult]
+    diff: ProjectStateDiff
+
+
+class CommitTransactionOutputV2(_StrictModel):
+    ok: Literal[True] = True
+    status: Literal["committed"]
+    project_id: StrictStr
+    revision: StrictInt
+    revision_id: StrictStr
+    parent_revision_id: StrictStr
+    transaction_hash: StrictStr
+    operation_results: list[OperationResult]
+    diff: ProjectStateDiff
+    timeline: dict[str, Any]
 
 
 class TransactionErrorDetail(_StrictModel):

@@ -63,19 +63,20 @@ def _field_changes(before: dict[str, Any], after: dict[str, Any], fields: Iterab
 
 def _asset_state(asset) -> SafeAsset:
     return SafeAsset(
-        id=asset.id, name=asset.name, codec=asset.codec, width=asset.width, height=asset.height,
+        id=asset.id, kind=asset.kind, name=asset.name, codec=asset.codec, width=asset.width, height=asset.height,
         fps=SafeFrameRate(**_fps(asset.fps)), duration_frames=asset.duration_frames,
         production=SafeAssetProduction(**_production(asset.production, asset=True)),
     )
 
 
 def _track_state(track, position: int) -> SafeTrack:
-    return SafeTrack(id=track.id, name=track.name, kind=track.kind, position=position)
+    return SafeTrack(id=track.id, name=track.name, kind=track.kind, position=position,
+                     external_refs=[SafeExternalReference(system=ref.system, id=ref.id, kind=ref.kind) for ref in track.external_refs])
 
 
 def _clip_state(clip, track_id: str) -> SafeClip:
     return SafeClip(
-        id=clip.id, track_id=track_id, asset_id=clip.asset_id,
+        id=clip.id, kind=clip.kind, track_id=track_id, asset_id=clip.asset_id,
         source_in_frame=clip.source_in_frame, source_out_frame=clip.source_out_frame,
         timeline_start_frame=clip.timeline_start_frame,
         production=SafeProduction(**_production(clip.production)),
@@ -112,7 +113,7 @@ def _entity_changes(
 def _asset_maps(project: Project):
     return {
         asset.id: ({
-            "name": asset.name, "codec": asset.codec, "width": asset.width, "height": asset.height,
+            "kind": asset.kind, "name": asset.name, "codec": asset.codec, "width": asset.width, "height": asset.height,
             "fps": _fps(asset.fps), "duration_frames": asset.duration_frames,
             "production/shot_ids": list(asset.production.shot_ids),
             "production/dialogue_line_ids": list(asset.production.dialogue_line_ids),
@@ -126,7 +127,8 @@ def _asset_maps(project: Project):
 
 def _track_maps(project: Project):
     return {
-        track.id: ({"name": track.name, "kind": track.kind, "position": position}, (track, position))
+        track.id: ({"name": track.name, "kind": track.kind, "position": position,
+                    "external_refs": _refs(track.external_refs)}, (track, position))
         for position, track in enumerate(project.timeline.tracks)
     }
 
@@ -136,7 +138,7 @@ def _clip_maps(project: Project):
     for track in project.timeline.tracks:
         for clip in track.clips:
             result[clip.id] = ({
-                "track_id": track.id, "asset_id": clip.asset_id,
+                "kind": clip.kind, "track_id": track.id, "asset_id": clip.asset_id,
                 "source_in_frame": clip.source_in_frame, "source_out_frame": clip.source_out_frame,
                 "timeline_start_frame": clip.timeline_start_frame,
                 "production/shot_ids": list(clip.production.shot_ids),
@@ -187,13 +189,19 @@ def diff_projects(before: Project, after: Project) -> RevisionChanges:
 
     project_before = {"name": before.name, "fps": _fps(before.fps), "external_refs": _refs(before.external_refs)}
     project_after = {"name": after.name, "fps": _fps(after.fps), "external_refs": _refs(after.external_refs)}
-    timeline_before = {"name": before.timeline.name, "external_refs": _refs(before.timeline.external_refs)}
-    timeline_after = {"name": after.timeline.name, "external_refs": _refs(after.timeline.external_refs)}
+    timeline_before = {"name": before.timeline.name, "external_refs": _refs(before.timeline.external_refs),
+                       "video_canvas": None if before.timeline.video_canvas is None else {"width": before.timeline.video_canvas.width, "height": before.timeline.video_canvas.height}}
+    timeline_after = {"name": after.timeline.name, "external_refs": _refs(after.timeline.external_refs),
+                      "video_canvas": None if after.timeline.video_canvas is None else {"width": after.timeline.video_canvas.width, "height": after.timeline.video_canvas.height}}
     project_fields = _field_changes(project_before, project_after, ("name", "fps", "external_refs"))
-    timeline_fields = _field_changes(timeline_before, timeline_after, ("name", "external_refs"))
+    canvas_fields = ()
+    if before.assets or any(track.clips for track in before.timeline.tracks):
+        if after.assets or any(track.clips for track in after.timeline.tracks):
+            canvas_fields = ("video_canvas",)
+    timeline_fields = _field_changes(timeline_before, timeline_after, ("name", "external_refs", *canvas_fields))
 
     assets_before, assets_after = _asset_maps(before), _asset_maps(after)
-    asset_fields = ("name", "codec", "width", "height", "fps", "duration_frames",
+    asset_fields = ("kind", "name", "codec", "width", "height", "fps", "duration_frames",
                     "production/shot_ids", "production/dialogue_line_ids",
                     "production/generation_job_id", "production/external_refs")
     asset_added, asset_removed, asset_modified = _entity_changes(
@@ -213,14 +221,14 @@ def diff_projects(before: Project, after: Project) -> RevisionChanges:
     asset_modified.sort(key=lambda item: item.id)
 
     tracks_before, tracks_after = _track_maps(before), _track_maps(after)
-    track_fields = ("name", "kind", "position")
+    track_fields = ("name", "kind", "position", "external_refs")
     track_added, track_removed, track_modified = _entity_changes(
         tracks_before, tracks_after, track_fields,
         lambda value: _track_state(value[1][0], value[1][1]),
     )
 
     clips_before, clips_after = _clip_maps(before), _clip_maps(after)
-    clip_fields = ("track_id", "asset_id", "source_in_frame", "source_out_frame", "timeline_start_frame",
+    clip_fields = ("kind", "track_id", "asset_id", "source_in_frame", "source_out_frame", "timeline_start_frame",
                    "production/shot_ids", "production/dialogue_line_ids", "production/external_refs")
     clip_added, clip_removed, clip_modified = _entity_changes(
         clips_before, clips_after, clip_fields,
