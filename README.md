@@ -30,17 +30,17 @@ Suggested recording assets:
 
 ## Features
 
-Implemented in v0.4.0:
+Implemented in v0.5.0:
 
 - local MP4 import and media streaming;
 - canonical integer-frame V1 timeline with stable IDs;
 - clip selection, split, trim, move, and delete;
 - Render Preview and MP4 export through local FFmpeg;
-- real Streamable HTTP MCP server with 23 tools, including timeline querying, deterministic revision diffs, forward-only revision restore, marker mutations, stateless transactions, and guarded editing;
+- real Streamable HTTP MCP server with 27 tools, including timeline querying, deterministic revision diffs, forward-only revision restore, marker mutations, stateless transactions, guarded editing, and multi-track video editing;
 - eight read-only MCP Resources plus safe REST timeline/query/revision/diff reads;
 - canonical point and range timeline markers with deterministic ordering;
 - revision-safe human and external-agent co-editing;
-- schema-v2 canonical projects with explicit Timeline identity;
+- schema-v3 canonical projects with explicit Timeline identity, persisted video canvas, and stacked video tracks;
 - immutable full-snapshot revision history with safe v1 promotion; and
 - deterministic local silence analysis and removal;
 - opt-in public EditGuards with capability-based authorization, leases, fail-closed runtime state, and guarded canonical mutations;
@@ -110,7 +110,7 @@ release.
 
 ## Canonical project and revisions
 
-Persisted v2 JSON has one top-level `timeline` object; timeline tracks are
+Persisted v3 JSON has one top-level `timeline` object; timeline tracks are
 never persisted as a competing top-level collection. Project, timeline, asset,
 track, and clip IDs are opaque and stable. Positions and revisions are integer
 frames/numbers; rational frame rates retain their numerator and denominator.
@@ -145,7 +145,7 @@ revision and stable IDs, mutate with `expected_revision`, then inspect again.
 
 ## Available MCP tools
 
-The server exposes exactly 23 tools:
+The server exposes exactly 27 tools:
 
 1. `list_projects`
 2. `get_timeline`
@@ -170,6 +170,10 @@ The server exposes exactly 23 tools:
 21. `renew_edit_guard`
 22. `release_edit_guard`
 23. `list_edit_guards`
+24. `add_track`
+25. `update_track`
+26. `delete_track`
+27. `reorder_track`
 
 The server also exposes eight read-only JSON Resources: the project collection,
 current project, current timeline, asset, clip, marker, revision collection,
@@ -237,7 +241,7 @@ MCP endpoints are intended for localhost development/MVP use only.
 
 ## Limitations
 
-- single source asset and V1-only timeline;
+- video-only multi-track timeline foundation; canonical audio tracks and advanced compositing controls remain deferred;
 - CFR media constraint;
 - no real-time composited timeline playback;
 - synchronous rendering;

@@ -18,7 +18,7 @@ flowchart TD
 ## Boundaries
 
 - **Canonical Project State:** `Project`, `Asset`, `Track`, and `Clip` models
-  are serialized to validated schema-v2 JSON with stable opaque IDs. The
+  are serialized to validated schema-v3 JSON with stable opaque IDs and a persisted video canvas. The
   canonical shape is `Project.timeline.tracks`; top-level REST `tracks` is only
   a compatibility alias.
 - **Timeline Markers:** typed absolute-frame point and range markers are owned
@@ -44,6 +44,7 @@ flowchart TD
   safe projections and never exposes source paths through timeline inspection.
   v0.3.0 adds stateless `prepare_transaction` and `commit_transaction` tools;
   v0.3.1 adds forward-only `restore_revision`; v0.4.0 adds public EditGuards;
+  v0.5.0 adds the multi-track video foundation;
   v0.2.3 added the typed
   `query_timeline` and `diff_revisions` tools; eight
   read-only Resources and REST reads reuse the same safe read boundaries.
@@ -100,7 +101,7 @@ including restore, silence removal, and media import/upload.
 - **FFmpeg Render Plan:** compiles canonical clips and gaps into a deterministic
   local FFmpeg command for preview or export.
 
-Marker state remains in schema v2 and participates in immutable snapshots,
+Marker state remains in schema v3 and participates in immutable snapshots,
 revision integrity digests, HEAD validation, parent-chain validation, and
 restart/reload. A v0.2.0 binary cannot open a marker-bearing v0.2.1 project,
 because v0.2.0 deliberately rejected nonempty marker collections; empty-marker

@@ -31,6 +31,7 @@ def timeline_projection(project: Project) -> dict:
         clips = sorted(track.clips, key=lambda item: (item.timeline_start_frame, item.id))
         tracks.append({
             "id": track.id, "name": track.name, "kind": track.kind,
+            "external_refs": [{"system": ref.system, "id": ref.id, "kind": ref.kind} for ref in track.external_refs],
             "clips": [{**clip_projection(clip, track, assets), "ordinal": index}
                       for index, clip in enumerate(clips, 1)],
             "gaps": _gaps(clips, content_end_frame),
@@ -38,6 +39,8 @@ def timeline_projection(project: Project) -> dict:
     return {"project_id": project.id, "name": project.name, "revision": project.revision,
             "revision_id": project.revision_id, "timeline_id": project.timeline.id,
             "fps": {"numerator": project.fps.numerator, "denominator": project.fps.denominator} if project.fps else None,
+            "schema_version": project.schema_version,
+            "video_canvas": {"width": project.timeline.video_canvas.width, "height": project.timeline.video_canvas.height} if project.timeline.video_canvas else None,
             "content_end_frame": content_end_frame, "display_end_frame": display_end_frame,
             "markers": [marker_projection(marker) for marker in markers],
             "tracks": tracks}

@@ -176,11 +176,12 @@ class ProjectStore:
                 head = HeadPointer(**json.load(handle))
             validate_revision_id(head.revision_id)
             record = self._load_revision_record(directory, head.revision_id)
+            # Authenticate the exact raw HEAD snapshot before any v2 -> v3
+            # migration or typed interpretation can occur.
+            head.validate_raw(record.snapshot)
             project = project_from_dict(record.snapshot)
             records = self._validate_reachable_chain(directory, record)
-            if snapshot_hash(record.snapshot) != head.snapshot_sha256:
-                raise ValidationError("HEAD and revision snapshot hashes differ")
-            head.validate(project)
+            head.validate_identity(project)
             return project, records
         except (OSError, json.JSONDecodeError, KeyError, TypeError, ValidationError) as exc:
             raise ValidationError(f"Invalid directory-backed project: {directory}: {exc}") from exc

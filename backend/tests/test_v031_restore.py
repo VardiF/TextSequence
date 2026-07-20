@@ -261,7 +261,7 @@ def test_restore_rest_mcp_parity_and_strict_request(tmp_path, monkeypatch):
         json={"expected_revision": 999, "expected_revision_id": response.json()["revision_id"], "extra": True},
     )
     assert strict.status_code == 422
-    assert len(mcp._tool_manager.list_tools()) == 23
+    assert len(mcp._tool_manager.list_tools()) == 27
 
 
 def test_restore_rest_errors_use_stable_codes_and_no_raw_paths(tmp_path, monkeypatch):

@@ -4,7 +4,7 @@ from copy import deepcopy
 from uuid import uuid4
 from typing import Callable, Optional
 
-from .models import Asset, Clip, FrameRate, Marker, MarkerProductionMetadata, Project, TimelineConflictError, Track, ValidationError, marker_production_from_dict, marker_sort_key
+from .models import Asset, Clip, FrameRate, Marker, MarkerProductionMetadata, Project, TimelineConflictError, Track, ValidationError, VideoCanvas, marker_production_from_dict, marker_sort_key
 
 
 def new_project(name: str) -> Project:
@@ -13,17 +13,24 @@ def new_project(name: str) -> Project:
     return project
 
 
-def register_asset(project: Project, asset: Asset) -> Project:
+def register_asset(project: Project, asset: Asset, target_track_id: str | None = None, timeline_start_frame: int | None = None) -> Project:
     if project.assets and project.fps != asset.fps:
         raise ValidationError("Cross-frame-rate media is unsupported")
     if not project.assets:
         project.fps = FrameRate(asset.fps.numerator, asset.fps.denominator)
     project.assets.append(asset)
-    v1 = next((track for track in project.tracks if track.name == "V1"), None)
-    if v1 is None:
-        v1 = Track(id=f"track_{uuid4().hex}", name="V1")
-        project.tracks.append(v1)
-    v1.clips.append(Clip(id=f"clip_{uuid4().hex}", asset_id=asset.id, source_in_frame=0, source_out_frame=asset.duration_frames, timeline_start_frame=0))
+    if project.timeline.video_canvas is None:
+        project.timeline.video_canvas = VideoCanvas(asset.width, asset.height)
+    target = next((track for track in project.tracks if track.id == target_track_id), None) if target_track_id else project.tracks[0]
+    if target is None:
+        raise ValidationError("Target track does not exist")
+    start = 0 if timeline_start_frame is None else timeline_start_frame
+    if isinstance(start, bool) or not isinstance(start, int) or start < 0:
+        raise ValidationError("Timeline start must be a non-negative integer")
+    if timeline_start_frame is None and target.clips:
+        start = max(clip.timeline_start_frame + clip.duration_frames for clip in target.clips)
+    target.clips.append(Clip(id=f"clip_{uuid4().hex}", asset_id=asset.id, source_in_frame=0, source_out_frame=asset.duration_frames, timeline_start_frame=start))
+    target.clips.sort(key=lambda item: (item.timeline_start_frame, item.id))
     project.validate()
     return project
 
@@ -111,9 +118,74 @@ def _find_clip(project: Project, clip_id: str) -> tuple[Track, Clip]:
     raise ValidationError(f"Clip does not exist: {clip_id}")
 
 
+def _find_track(project: Project, track_id: str) -> Track:
+    track = next((item for item in project.tracks if item.id == track_id), None)
+    if track is None:
+        raise ValidationError(f"Track does not exist: {track_id}")
+    return track
+
+
+def new_track_id() -> str:
+    return f"track_{uuid4().hex}"
+
+
+def add_track(project: Project, name: str, position: int | None = None,
+              external_refs: list | None = None, track_id: str | None = None) -> Project:
+    if not isinstance(name, str) or not 1 <= len(name.strip()) <= 160:
+        raise ValidationError("Track name must be 1-160 characters")
+    if position is not None and (isinstance(position, bool) or not isinstance(position, int) or not 0 <= position <= len(project.tracks)):
+        raise ValidationError("Track position is invalid")
+    def edit(edited: Project) -> None:
+        track = Track(id=track_id or new_track_id(), name=name.strip(), kind="video", external_refs=external_refs or [])
+        edited.tracks.insert(len(edited.tracks) if position is None else position, track)
+    return _apply_edit(project, edit)
+
+
+def update_track(project: Project, track_id: str, name: str | None = None,
+                 external_refs: list | None = None) -> Project:
+    def edit(edited: Project) -> None:
+        track = _find_track(edited, track_id)
+        next_name = track.name if name is None else name.strip()
+        next_refs = track.external_refs if external_refs is None else deepcopy(external_refs)
+        if not isinstance(next_name, str) or not 1 <= len(next_name) <= 160:
+            raise ValidationError("Track name must be 1-160 characters")
+        if next_name == track.name and next_refs == track.external_refs:
+            raise ValidationError("NO_CHANGES")
+        track.name = next_name
+        track.external_refs = next_refs
+    return _apply_edit(project, edit)
+
+
+def delete_track(project: Project, track_id: str) -> Project:
+    def edit(edited: Project) -> None:
+        track = _find_track(edited, track_id)
+        if len(edited.tracks) == 1:
+            raise ValidationError("Cannot delete the last video track")
+        if track.clips:
+            raise ValidationError("Track must be empty before deletion")
+        edited.tracks = [item for item in edited.tracks if item.id != track_id]
+    return _apply_edit(project, edit)
+
+
+def reorder_track(project: Project, track_id: str, position: int) -> Project:
+    if isinstance(position, bool) or not isinstance(position, int) or not 0 <= position < len(project.tracks):
+        raise ValidationError("Track position is invalid")
+    def edit(edited: Project) -> None:
+        index = next((i for i, item in enumerate(edited.tracks) if item.id == track_id), None)
+        if index is None:
+            raise ValidationError(f"Track does not exist: {track_id}")
+        if index == position:
+            raise ValidationError("NO_CHANGES")
+        track = edited.tracks.pop(index)
+        edited.tracks.insert(position, track)
+    return _apply_edit(project, edit)
+
+
 def _apply_edit(project: Project, edit: Callable[[Project], None]) -> Project:
     edited = deepcopy(project)
     edit(edited)
+    for track in edited.tracks:
+        track.clips.sort(key=lambda item: (item.timeline_start_frame, item.id))
     edited.validate()
     return edited
 
@@ -154,14 +226,18 @@ def _ensure_no_collisions(track: Track) -> None:
             raise TimelineConflictError(f"Clip {current.id} would overlap clip {previous.id} on {track.name}")
 
 
-def move_clip(project: Project, clip_id: str, timeline_start_frame: int) -> Project:
-    if timeline_start_frame < 0:
+def move_clip(project: Project, clip_id: str, timeline_start_frame: int, target_track_id: str | None = None) -> Project:
+    if isinstance(timeline_start_frame, bool) or not isinstance(timeline_start_frame, int) or timeline_start_frame < 0:
         raise ValidationError("Timeline start must be non-negative")
 
     def edit(edited: Project) -> None:
-        track, clip = _find_clip(edited, clip_id)
+        source_track, clip = _find_clip(edited, clip_id)
+        target_track = source_track if target_track_id is None else _find_track(edited, target_track_id)
+        source_track.clips = [item for item in source_track.clips if item.id != clip_id]
         clip.timeline_start_frame = timeline_start_frame
-        _ensure_no_collisions(track)
+        target_track.clips.append(clip)
+        target_track.clips.sort(key=lambda item: (item.timeline_start_frame, item.id))
+        _ensure_no_collisions(target_track)
 
     return _apply_edit(project, edit)
 

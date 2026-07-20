@@ -102,4 +102,6 @@ def query_timeline(project: Project, raw_query: dict[str, Any]) -> dict:
             markers.append(marker_projection(marker))
     clips.sort(key=lambda item: (item["timeline_start_frame"], item["id"]))
     return {"project_id": project.id, "revision": project.revision, "revision_id": project.revision_id,
+            "schema_version": project.schema_version,
+            "video_canvas": None if project.timeline.video_canvas is None else {"width": project.timeline.video_canvas.width, "height": project.timeline.video_canvas.height},
             "query": raw_query, "clips": clips, "markers": markers, "result_count": len(clips) + len(markers)}

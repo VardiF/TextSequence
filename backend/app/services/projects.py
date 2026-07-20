@@ -8,10 +8,12 @@ from threading import Lock, RLock
 from typing import Optional
 from uuid import uuid4
 
-from app.domain.models import Marker, ValidationError, marker_production_from_dict, project_from_dict, validate_revision_id
+from app.domain.models import ExternalReference, Marker, ValidationError, marker_production_from_dict, project_from_dict, validate_revision_id
 from app.domain.silence import SourceRemovalRange, apply_silence_removals
 from app.audio.silence import AssetSilenceAnalysis, SilenceAnalysisError, analyze_asset, milliseconds_to_frames, silence_dict, validate_parameters
-from app.domain.operations import add_marker, delete_clip, delete_marker, move_clip, new_marker_id, new_project, register_asset, split_clip, trim_clip, update_marker
+from app.domain.operations import (add_marker, add_track, delete_clip, delete_marker, delete_track, move_clip,
+                                   new_marker_id, new_project, register_asset, reorder_track, split_clip, trim_clip,
+                                   update_marker, update_track)
 from app.domain.models import project_to_dict
 from app.media.probe import probe_media
 from app.persistence.project_store import ProjectStore, RevisionNotFoundError, StaleRevisionError
@@ -27,6 +29,7 @@ from app.services.projections import revision_metadata_projection
 from app.services.transactions import TransactionService
 from app.services.restore import RestoreService
 from app.services.guards import GuardService
+from app.guard_models import MutationFootprint
 
 
 class ProjectService:
@@ -159,6 +162,8 @@ class ProjectService:
                        guard_tokens: Optional[list[str]] = None) -> dict:
         validate_parameters(minimum_silence_ms, noise_threshold_db, keep_padding_ms)
         initial = self.store.load(project_id)
+        if sum(bool(track.clips) for track in initial.timeline.tracks) > 1:
+            raise SilenceAnalysisError("MULTI_TRACK_SILENCE_UNSUPPORTED", "Silence removal is unavailable when clips occupy multiple video tracks")
         analyses = self._analyze_project_silence(initial, minimum_silence_ms, noise_threshold_db)
         padding_frames = milliseconds_to_frames(keep_padding_ms, initial.fps.as_tuple()) if initial.fps else 0
         removals: list[SourceRemovalRange] = []
@@ -193,10 +198,11 @@ class ProjectService:
             if asset.id == asset_id: return Path(asset.path)
         raise FileNotFoundError(f"Asset does not exist: {asset_id}")
 
-    def import_media(self, project_id: str, path: str, origin: str = "rest", actor: Optional[dict[str, str]] = None,
+    def import_media(self, project_id: str, path: str, target_track_id: str | None = None,
+                     timeline_start_frame: int | None = None, origin: str = "rest", actor: Optional[dict[str, str]] = None,
                      guard_tokens: Optional[list[str]] = None):
         asset = probe_media(path)
-        return self._commit_operation(project_id, None, lambda project: register_asset(project, asset), origin, actor,
+        return self._commit_operation(project_id, None, lambda project: register_asset(project, asset, target_track_id, timeline_start_frame), origin, actor,
                                       "import_media", f"Import media {asset.name}", guard_tokens=guard_tokens)
 
     @staticmethod
@@ -207,6 +213,7 @@ class ProjectService:
         return basename[:180] or "video"
 
     async def import_uploaded_media(self, project_id: str, upload, expected_revision: int,
+                                    target_track_id: str | None = None, timeline_start_frame: int | None = None,
                                     origin: str = "rest", actor: Optional[dict[str, str]] = None,
                                     guard_tokens: Optional[list[str]] = None):
         # Validate the project before creating any managed media directory.
@@ -230,7 +237,7 @@ class ProjectService:
             os.replace(temporary, destination)
             asset = probe_media(str(destination), display_name=safe_name)
             return self._commit_operation(project_id, expected_revision,
-                lambda project: register_asset(project, asset), origin, actor,
+                lambda project: register_asset(project, asset, target_track_id, timeline_start_frame), origin, actor,
                 "import_media", f"Import media {asset.name}", guard_tokens=guard_tokens)
         except Exception:
             for path in (temporary, destination):
@@ -257,7 +264,8 @@ class ProjectService:
             edited = operation(deepcopy(project))
             if project_to_dict(edited) == project_to_dict(project):
                 return project
-            self.guards.authorize(project_id, project, edited, guard_tokens)
+            footprint = MutationFootprint(project_wide=operation_name in {"add_track", "update_track", "delete_track", "reorder_track"})
+            self.guards.authorize(project_id, project, edited, guard_tokens, footprint=footprint if footprint.project_wide else None)
             edited.revision = project.revision + 1
             edited.revision_id = self.store.revision_id_factory()
             return self.store.commit(loaded, edited, project.revision_id, origin,
@@ -272,8 +280,22 @@ class ProjectService:
 
     def split(self, project_id, clip_id, timeline_frame, expected_revision, origin="rest", actor=None, guard_tokens=None): return self._mutate(project_id, expected_revision, split_clip, clip_id, timeline_frame, origin=origin, actor=actor, operation_name="split_clip", summary="Split clip", guard_tokens=guard_tokens)
     def delete(self, project_id, clip_id, expected_revision, origin="rest", actor=None, guard_tokens=None): return self._mutate(project_id, expected_revision, delete_clip, clip_id, origin=origin, actor=actor, operation_name="delete_clip", summary="Delete clip", guard_tokens=guard_tokens)
-    def move(self, project_id, clip_id, timeline_start_frame, expected_revision, origin="rest", actor=None, guard_tokens=None): return self._mutate(project_id, expected_revision, move_clip, clip_id, timeline_start_frame, origin=origin, actor=actor, operation_name="move_clip", summary="Move clip", guard_tokens=guard_tokens)
+    def move(self, project_id, clip_id, timeline_start_frame, expected_revision, target_track_id=None, origin="rest", actor=None, guard_tokens=None): return self._mutate(project_id, expected_revision, move_clip, clip_id, timeline_start_frame, target_track_id, origin=origin, actor=actor, operation_name="move_clip", summary="Move clip", guard_tokens=guard_tokens)
     def trim(self, project_id, clip_id, expected_revision, source_in_frame=None, source_out_frame=None, origin="rest", actor=None, guard_tokens=None): return self._mutate(project_id, expected_revision, trim_clip, clip_id, source_in_frame, source_out_frame, origin=origin, actor=actor, operation_name="trim_clip", summary="Trim clip", guard_tokens=guard_tokens)
+
+    def add_track(self, project_id, expected_revision, name, position=None, external_refs=None, origin="rest", actor=None, guard_tokens=None):
+        refs = [item if isinstance(item, ExternalReference) else ExternalReference(item["system"], item["id"], item.get("kind", "")) for item in (external_refs or [])]
+        return self._mutate(project_id, expected_revision, add_track, name, position, refs, origin=origin, actor=actor, operation_name="add_track", summary="Add video track", guard_tokens=guard_tokens)
+
+    def update_track(self, project_id, track_id, expected_revision, name=None, external_refs=None, origin="rest", actor=None, guard_tokens=None):
+        refs = None if external_refs is None else [item if isinstance(item, ExternalReference) else ExternalReference(item["system"], item["id"], item.get("kind", "")) for item in external_refs]
+        return self._mutate(project_id, expected_revision, update_track, track_id, name, refs, origin=origin, actor=actor, operation_name="update_track", summary="Update video track", guard_tokens=guard_tokens)
+
+    def delete_track(self, project_id, track_id, expected_revision, origin="rest", actor=None, guard_tokens=None):
+        return self._mutate(project_id, expected_revision, delete_track, track_id, origin=origin, actor=actor, operation_name="delete_track", summary="Delete video track", guard_tokens=guard_tokens)
+
+    def reorder_track(self, project_id, track_id, expected_revision, position, origin="rest", actor=None, guard_tokens=None):
+        return self._mutate(project_id, expected_revision, reorder_track, track_id, position, origin=origin, actor=actor, operation_name="reorder_track", summary="Reorder video track", guard_tokens=guard_tokens)
 
     def add_marker(self, project_id: str, expected_revision: int, start_frame: int, end_frame=None,
                    name: str = "", description: str = "", marker_type: str = "generic", production=None,
@@ -306,19 +328,26 @@ class ProjectService:
             return trim_clip(project, clip_id, clip.source_in_frame + frames_to_remove, None) if edge == "start" else trim_clip(project, clip_id, None, clip.source_out_frame - frames_to_remove)
         return self._commit_operation(project_id, expected_revision, operation, origin, actor, "trim_clip", "Trim clip", guard_tokens=guard_tokens)
 
-    def move_to_gap(self, project_id, clip_id, gap_ordinal, expected_revision, origin="rest", actor=None, guard_tokens=None):
+    def move_to_gap(self, project_id, clip_id, gap_ordinal, expected_revision, target_track_id=None, origin="rest", actor=None, guard_tokens=None):
         if not isinstance(gap_ordinal, int) or gap_ordinal < 1: raise ValidationError("gap_ordinal must be positive")
         def operation(project):
+            source_track = next((track for track in project.timeline.tracks if any(c.id == clip_id for c in track.clips)), None)
+            if source_track is None:
+                raise ValidationError(f"Clip does not exist: {clip_id}")
+            target_id = target_track_id or source_track.id
+            if not any(track.id == target_id for track in project.timeline.tracks):
+                raise ValidationError("Target track does not exist")
             for track in project.timeline.tracks:
                 clip = next((c for c in track.clips if c.id == clip_id), None)
                 if clip:
                     without = deepcopy(project)
-                    target = next(t for t in without.timeline.tracks if t.id == track.id)
-                    target.clips = [c for c in target.clips if c.id != clip_id]
-                    gaps = next(t["gaps"] for t in timeline_projection(without)["tracks"] if t["id"] == track.id)
+                    target = next(t for t in without.timeline.tracks if t.id == target_id)
+                    for candidate in without.timeline.tracks:
+                        candidate.clips = [c for c in candidate.clips if c.id != clip_id]
+                    gaps = next(t["gaps"] for t in timeline_projection(without)["tracks"] if t["id"] == target_id)
                     gap = next((g for g in gaps if g["gap_ordinal"] == gap_ordinal), None)
                     if gap is None: raise ValidationError("Gap does not exist")
-                    result = move_clip(project, clip_id, gap["start_frame"])
+                    result = move_clip(project, clip_id, gap["start_frame"], target_id)
                     return result
             raise ValidationError(f"Clip does not exist: {clip_id}")
         return self._commit_operation(project_id, expected_revision, operation, origin, actor, "move_clip", "Move clip to gap", guard_tokens=guard_tokens)

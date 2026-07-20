@@ -15,7 +15,11 @@ The MCP endpoint remains available without `OPENAI_API_KEY`.
 
 ## Available tools
 
-The current server exposes exactly these 23 tools:
+The current server exposes exactly these 27 tools:
+
+The track mutation tools are `add_track`, `update_track`, `delete_track`, and
+`reorder_track`; they use the same revision and guard-token conventions as
+the existing mutations.
 
 ### `list_projects()`
 

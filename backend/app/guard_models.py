@@ -230,8 +230,9 @@ def mutation_footprint(before: Project, final: Project) -> MutationFootprint:
         before_data["timeline"]["id"] != final_data["timeline"]["id"] or
         before_data["timeline"]["name"] != final_data["timeline"]["name"] or
         before_data["timeline"]["external_refs"] != final_data["timeline"]["external_refs"] or
-        [(track["id"], track["name"], track["kind"]) for track in before_data["timeline"]["tracks"]] !=
-        [(track["id"], track["name"], track["kind"]) for track in final_data["timeline"]["tracks"]]
+        [(track["id"], track["name"], track["kind"], track["external_refs"]) for track in before_data["timeline"]["tracks"]] !=
+        [(track["id"], track["name"], track["kind"], track["external_refs"]) for track in final_data["timeline"]["tracks"]] or
+        before_data["timeline"].get("video_canvas") != final_data["timeline"].get("video_canvas")
     )
     before_clips = {clip["id"]: {**clip, "_track_id": track["id"]}
                     for track in before_data["timeline"]["tracks"] for clip in track["clips"]}

@@ -32,7 +32,7 @@ editor to apply one revision-checked batch edit.
 
 ## OpenAI ecosystem / MCP
 
-The product exposes a real Streamable HTTP MCP server with 23 tools and eight
+The product exposes a real Streamable HTTP MCP server with 27 tools and eight
 read-only JSON Resources. It can be
 connected to compatible external clients, including Codex CLI registration.
 An optional built-in OpenAI assistant is available when configured, but core
@@ -50,13 +50,13 @@ persistence deterministically.
 - Local CFR H.264/AAC media import and streaming
 - Integer-frame V1 timeline with split, trim, move, and delete
 - Render Preview and MP4 export
-- 23 MCP tools with revision-safe mutations, timeline querying, deterministic revision diffs, forward-only revision restore, canonical marker edits, stateless transactions, and guarded editing
+- 27 MCP tools with revision-safe mutations, timeline querying, deterministic revision diffs, forward-only revision restore, canonical marker edits, stateless transactions, guarded editing, and multi-track video editing
 - Deterministic local silence analysis and removal
 - Human and external MCP co-editing through canonical JSON, with opt-in capability-based EditGuards and lease persistence
 
 ## Known limitations
 
-TextSequence is single-source-asset and V1-only, does not provide real-time
+TextSequence supports local video assets across a stacked multi-track timeline; it does not provide real-time
 composited timeline playback, and renders synchronously. It does not include
 transcription, semantic video understanding, best-take selection, transitions,
 or effects. The local MCP endpoint is unauthenticated and intended for
