@@ -47,6 +47,54 @@ Implemented in v0.5.0:
 - optional built-in OpenAI assistant; and
 - no `OPENAI_API_KEY` requirement for core editing, rendering, or MCP use.
 
+## How Codex and GPT-5.6 were used
+
+I only discovered the Build Week hackathon through an email on July 17 and
+started TextSequence then. GPT-5.6 was my primary technical co-pilot and
+prompt-engineering layer throughout the project. It turned product ideas into
+concrete architecture, broke the work into release-sized milestones, and
+helped me write detailed Codex prompts with implementation constraints and
+acceptance criteria. Before Codex executed a stage, I used GPT-5.6 to reason
+through persistence, revisions, MCP, transactions, EditGuards, rendering,
+schema migration, and multi-track editing—not to send a vague “build a video
+editor” request.
+
+It also helped me interpret Codex outputs and test results, design human
+acceptance checks, prepare targeted bug-fix and adversarial-review prompts,
+and sequence releases. I used three distinct Codex roles:
+
+### Sol — Architect
+
+Sol made architecture-only passes: it inspected the real repository and
+reasoned through major changes—revision history, MCP surfaces, transactions,
+restore, EditGuards, schema migration, and the multi-track timeline—before
+implementation. Sol explicitly did not implement during those passes.
+
+### Luna — Executor
+
+Luna implemented the approved architecture across backend and frontend, added
+tests, ran full validation, and performed browser and MCP acceptance. It
+verified rendering, persistence, and compatibility, but did not merge or tag
+during implementation.
+
+### Terra — Adversarial Reviewer
+
+Terra was the final release gate. It actively tried to break completed work:
+integrity and migration, transaction determinism, EditGuard bypasses,
+concurrency, restore, rendering, MCP and REST behavior, frontend regressions,
+path and secret safety, and release hygiene.
+
+That separation mattered: architecture, implementation, and review were kept
+separate so one agent was not designing, implementing, and approving its own
+work. For example, in the final v0.5.0 review, Terra found that a same-frame
+move between video tracks worked through the normal edit path but transaction
+v2 incorrectly rejected it as `NO_CHANGES`. The issue was fixed,
+regression-tested, and re-reviewed before merge.
+
+I used 100% of my available OpenAI usage, right up to the final Terra evaluation. The
+final MCP demo uses Qwen because that OpenAI usage was exhausted; it also
+demonstrates that TextSequence's MCP architecture is agent-agnostic.
+
 ## MCP-native architecture
 
 ```mermaid
